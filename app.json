@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "CraveNav Tracker",
+    "slug": "cravenav-map-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0b0f17"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.luismalana.cravenav",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "CraveNav uses your live GPS location to find nearby restaurants and track your walking path in real time."
+      }
+    },
+    "android": {
+      "package": "com.luismalana.cravenav",
+      "adaptiveIcon": {
+        "backgroundColor": "#ff5722"
+      },
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow CraveNav to access your live GPS location to find nearby restaurants and guide your walk."
+        }
+      ]
+    ]
+  }
+}

@@ -1,20 +1,20 @@
-# 🍜 CraveNav — Live Restaurant & Walking Path Tracker
+# 🍜 CraveNav — Expo (React Native) Live Restaurant & Walking Path Tracker
 
-A real-time **Progressive Web App (PWA)** built in `C:\Tracker` that locates your current GPS position, discovers nearby restaurants/cafés/fast food, draws the exact street path to get there, and tracks you in real time as you walk closer to your destination.
+A native **React Native + Expo** mobile application built in `C:\Tracker` that tracks your real-time hardware GPS (`expo-location`), discovers nearby restaurants/cafés/fast food, draws the exact street path to get there, and guides you step-by-step as you walk closer to your destination.
 
 ---
 
-## 🧱 Tech Stack & Architecture (100% Free, Zero API Key Billing Required)
+## 🧱 Tech Stack (Expo / React Native)
 
-| Layer | Technology | Purpose |
+| Layer | Package | Purpose |
 | :--- | :--- | :--- |
-| **Map Engine** | **Leaflet.js 1.9.4 + CARTO / Esri Tiles** | High-speed interactive map with Dark Mode, Clean Street, and Satellite views |
-| **Live GPS Tracking** | **HTML5 Geolocation API (`watchPosition`)** | Continuous high-accuracy GPS tracking as you walk |
-| **Restaurant Radar** | **OpenStreetMap Overpass API** | Automatically scans real restaurants, cafés, milk tea, and fast-food spots around your live radius |
-| **Place Search** | **Photon (Komoot) Geocoding API** | Search any restaurant name or landmark locally or globally |
-| **Street Routing** | **OSRM (Open Source Routing Machine)** | Calculates exact street geometry, turn-by-turn directions, distance, and walking/riding ETA |
-| **Voice Guide** | **Web Speech API (`speechSynthesis`)** | Speaks turn-by-turn street instructions aloud while you walk |
-| **Installable App** | **PWA (`manifest.json` + `sw.js`)** | Installable onto Android & iOS home screens |
+| **Framework** | **React Native + Expo** | Cross-platform native Android & iOS mobile app |
+| **Live Hardware GPS** | **`expo-location` (`watchPositionAsync`)** | `BestForNavigation` real-time GPS tracking every 1 meter |
+| **Voice Navigation** | **`expo-speech`** | Native text-to-speech turn-by-turn street announcements |
+| **Screen Wake Lock** | **`expo-keep-awake`** | Keeps phone screen awake while walking |
+| **Map Engine** | **`react-native-webview` + Leaflet + Google Tiles** | Direct Google Maps Street, Dark Mode & Satellite views (Zero Google Cloud billing key required; never crashes in APK!) |
+| **Favorites Storage** | **`@react-native-async-storage/async-storage`** | Persistent saved favorite food spots on device |
+| **APK Builder** | **EAS Build (`eas.json`)** | Pre-configured with `"buildType": "apk"` |
 
 ---
 
@@ -22,32 +22,36 @@ A real-time **Progressive Web App (PWA)** built in `C:\Tracker` that locates you
 
 ```text
 C:\Tracker\
-├── index.html          # Main App Shell (Responsive Desktop + Mobile Bottom Sheet)
-├── css\
-│   └── styles.css      # Glassmorphism Dark UI, Glowing GPS Pulse & Custom Pin Styles
-├── js\
-│   ├── app.js          # Core Controller, Filters, Favorites & Random Roulette
-│   ├── map.js          # Leaflet Map Engine, Tile Switcher & Split Walked/Remaining Polyline
-│   ├── gps.js          # Real-Time GPS watchPosition + Built-In Street Walk Simulator
-│   ├── places.js       # Overpass Restaurant Scanner + Photon Search + Haversine Distance
-│   └── router.js       # OSRM Turn-by-Turn Routing, Live Progress % & Voice Synthesis
-├── manifest.json       # Progressive Web App Manifest
-├── sw.js               # Offline Service Worker
-├── launch.bat          # 1-Click Server & Browser Launcher
-└── README.md           # Documentation
+├── App.js                           # Main React Native UI, GPS Watcher & Navigation HUD
+├── index.js                         # Expo Root Entry
+├── app.json                         # Expo Config & Android GPS Permissions
+├── eas.json                         # EAS Build Config (Pre-set to output .apk)
+├── package.json                     # Dependencies & Scripts
+└── src\
+    ├── components\
+    │   └── MapCanvas.js             # Interactive Map Bridge (Google Street / Dark / Satellite)
+    └── services\
+        ├── placesService.js         # Overpass Restaurant Radar + Photon Search + Haversine
+        └── routeService.js          # OSRM Street Routing, Turn-by-Turn & Live Progress %
 ```
 
 ---
 
-## 🚀 Key Features
+## 🚀 How to Run in Expo Go & Build the `.apk`
 
-1. **📍 Live "Getting Closer" Walk Tracker:**
-   * Shows your remaining distance (`e.g. 420 m -> 380 m -> 310 m`), estimated minutes left, and a live **0% → 100% Progress Bar**.
-   * Splits the route line on the map into **Walked Path (dashed)** and **Remaining Path (glowing emerald green)**.
-   * Pops up an **Arrival Celebration** when you get within 25 meters of the restaurant!
-2. **🚶 Built-in "Simulate Walk" Mode:**
-   * Want to test how it behaves while sitting at your desk? Click **🚶 Simulate Walk** in the navigation HUD to watch your GPS marker walk along the streets turn-by-turn in real time!
-3. **🎲 "Can't Decide?" Random Restaurant Roulette:**
-   * Click the **🎲 dice button** next to the search bar to randomly pick a nearby food spot and immediately route to it.
-4. **🖱️ Right-Click Teleport (Desktop Testing):**
-   * Right-click anywhere on the map to move your starting location to any street or city and immediately scan restaurants there.
+### 1. Test Live on Your Phone with Expo Go
+```bash
+cd C:\Tracker
+npm install
+npx expo start
+```
+Scan the QR code in the terminal using the **Expo Go** app on your phone!
+
+### 2. Build a Standalone Downloadable Android `.apk`
+`eas.json` is already configured with `"buildType": "apk"` under the `preview` profile:
+```bash
+npm install -g eas-cli
+eas login
+eas build -p android --profile preview
+```
+When the build finishes, EAS gives you a direct download link + QR code to install the `.apk` on your phone!
