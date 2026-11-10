@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b0f17" />
+  <title>CraveNav — Live Restaurant & Walking Tracker</title>
+
+  <link rel="manifest" href="manifest.json" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Leaflet 1.9.4 CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="css/styles.css?v=3" />
+</head>
+<body>
+
+  <!-- Fullscreen Interactive Map -->
+  <div id="map"></div>
+
+  <!-- Left / Bottom Glassmorphism Restaurant Explorer Panel -->
+  <aside class="sidebar-panel" id="sidebarPanel">
+    <div class="mobile-sheet-toggle" id="mobileSheetToggle">
+      <div class="sheet-handle"></div>
+    </div>
+
+    <div class="panel-header">
+      <div class="brand-row">
+        <div class="brand-logo">
+          <div class="brand-icon">🍜</div>
+          <div class="brand-title">
+            <h1>CraveNav</h1>
+            <p>Live Restaurant & Path Tracker</p>
+          </div>
+        </div>
+        <div class="gps-status-badge">
+          <span class="dot"></span>
+          <span id="gpsStatusText">Locating...</span>
+        </div>
+      </div>
+
+      <!-- Search + Random Roulette -->
+      <div class="search-box">
+        <div class="search-input-wrap">
+          <span class="search-icon">🔍</span>
+          <input
+            type="text"
+            id="searchInput"
+            class="search-input"
+            placeholder="Search restaurants, Jollibee, café, pizza..."
+            autocomplete="off"
+          />
+          <button class="clear-search-btn" id="clearSearchBtn">✕</button>
+        </div>
+        <button class="roulette-btn" id="rouletteBtn" title="Can't Decide? Pick a Random Restaurant!">
+          🎲
+        </button>
+      </div>
+    </div>
+
+    <!-- Category Filters -->
+    <div class="filter-bar">
+      <button class="chip active" data-cat="all">🍽️ All Food</button>
+      <button class="chip" data-cat="restaurant">🍜 Restaurants</button>
+      <button class="chip" data-cat="fast_food">🍔 Fast Food</button>
+      <button class="chip" data-cat="cafe">☕ Cafés & Boba</button>
+      <button class="chip" data-cat="favorites">❤️ Saved</button>
+    </div>
+
+    <!-- Sub-toolbar: Scan Radius & Travel Mode -->
+    <div class="sub-toolbar">
+      <div>
+        <span id="resultsCount">Scanning...</span> •
+        <select id="radiusSelect" class="radius-select" title="Radar Scan Radius">
+          <option value="800">800 m</option>
+          <option value="1500" selected>1.5 km</option>
+          <option value="3000">3.0 km</option>
+          <option value="5000">5.0 km</option>
+        </select>
+      </div>
+
+      <div class="travel-mode-group">
+        <button class="mode-btn active" data-mode="foot">🚶 Walk</button>
+        <button class="mode-btn" data-mode="driving">🛵 Ride</button>
+      </div>
+    </div>
+
+    <!-- Dynamic Nearby Restaurant Cards -->
+    <div class="places-list" id="placesList"></div>
+  </aside>
+
+  <!-- Live Turn-by-Turn & "Getting Closer" Navigation HUD -->
+  <section class="nav-hud" id="navHud">
+    <div class="nav-turn-banner">
+      <div class="turn-icon-box" id="turnIconBox">⬆️</div>
+      <div class="turn-details">
+        <div class="turn-instruction" id="turnInstruction">Select a restaurant</div>
+        <div class="turn-sub" id="turnSub">Calculating live street path...</div>
+      </div>
+    </div>
+
+    <!-- Live Shrinking Distance, ETA & Completion % -->
+    <div class="nav-stats-grid">
+      <div class="stat-cell">
+        <div class="stat-val" id="statDistVal">0 m</div>
+        <div class="stat-lbl">Remaining</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val" id="statEtaVal">0 min</div>
+        <div class="stat-lbl">Est. Time</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val" id="statPctVal">0%</div>
+        <div class="stat-lbl">Closer</div>
+      </div>
+    </div>
+
+    <!-- Getting Closer Progress Bar -->
+    <div class="progress-wrap">
+      <div class="progress-labels">
+        <span>📍 Start</span>
+        <span id="progressDestName">🏁 Destination</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+    </div>
+
+    <!-- Action Controls: Walk Simulator, Steps List, Voice Guide, Stop -->
+    <div class="nav-controls-row">
+      <button class="nav-action-btn" id="simWalkBtn" title="Test walking along the street path in real time">
+        🚶 Simulate Walk
+      </button>
+      <button class="nav-action-btn" id="toggleStepsBtn">
+        📋 Steps
+      </button>
+      <button class="nav-action-btn" id="voiceToggleBtn">
+        🔇 Voice: OFF
+      </button>
+      <button class="nav-action-btn stop-btn" id="stopNavBtn">
+        ✕ End
+      </button>
+    </div>
+
+    <!-- Collapsible Turn-by-Turn Steps List -->
+    <div class="steps-drawer" id="stepsDrawer"></div>
+  </section>
+
+  <!-- Floating Map Right Buttons -->
+  <div class="map-fab-col">
+    <button class="fab-btn active" id="recenterBtn" title="Center on My Live Location">🎯</button>
+    <button class="fab-btn" id="rescanBtn" title="Rescan Restaurants Here">🔄</button>
+    <button class="fab-btn" id="layerBtn" title="Switch Map Style (Dark / Street / Satellite)">🗺️</button>
+  </div>
+
+  <!-- Random Restaurant Roulette Modal -->
+  <div class="modal-backdrop" id="rouletteModal">
+    <div class="modal-card">
+      <div class="modal-emoji" id="rouletteEmoji">🍔</div>
+      <h2 id="rouletteName">Random Pick!</h2>
+      <p id="rouletteDesc">We picked a spot for you!</p>
+      <button class="modal-primary-btn" id="rouletteGoBtn" style="margin-bottom:8px;">
+        🚶 Show Path & Let's Go!
+      </button>
+      <button
+        id="closeRouletteBtn"
+        style="background:none;border:none;color:#94a3b8;font-size:13px;cursor:pointer;padding:6px;"
+      >
+        Spin Again / Cancel
+      </button>
+    </div>
+  </div>
+
+  <!-- Destination Arrival Celebration Modal -->
+  <div class="modal-backdrop" id="arrivalModal">
+    <div class="modal-card">
+      <div class="modal-emoji">🎉🍽️</div>
+      <h2>You Have Arrived!</h2>
+      <p>You made it to <strong id="arrivalPlaceName" style="color:#fff;">your restaurant</strong>! Enjoy your meal!</p>
+      <button class="modal-primary-btn" id="closeArrivalBtn">Awesome, Let's Eat!</button>
+    </div>
+  </div>
+
+  <!-- Leaflet JS + App Modules -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="js/map.js?v=3"></script>
+  <script src="js/gps.js?v=3"></script>
+  <script src="js/places.js?v=3"></script>
+  <script src="js/router.js?v=3"></script>
+  <script src="js/app.js?v=3"></script>
+</body>
+</html>
