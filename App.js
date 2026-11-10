@@ -337,9 +337,14 @@ export default function App() {
       <View style={styles.mapWrap}>
         <MapCanvas
           ref={mapRef}
+          userPos={userPos}
+          radiusMeters={radiusMeters}
+          places={filteredPlaces}
+          selectedId={selectedPlace ? selectedPlace.id : null}
+          remainingCoords={liveNav ? liveNav.remainingCoords : activeRoute ? activeRoute.coords : []}
+          walkedCoords={liveNav ? liveNav.walkedCoords : []}
           onMapReady={() => {
             setMapReady(true);
-            mapRef.current?.updateUser(userPos.lat, userPos.lng, radiusMeters);
           }}
           onSelectPlaceId={(placeId) => {
             const found = allPlaces.find((p) => p.id === placeId);
@@ -680,10 +685,10 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#0b0f17',
+    backgroundColor: '#e5e3df',
     paddingTop: Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0
   },
-  mapWrap: { ...StyleSheet.absoluteFillObject },
+  mapWrap: { flex: 1 },
   fabCol: {
     position: 'absolute',
     right: 12,
