@@ -7,6 +7,18 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter'
 ];
 
+const HEADERS = {
+  'User-Agent': 'CraveNavMobile/1.0 (Android; Expo)',
+  Accept: 'application/json'
+};
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), timeoutMs))
+  ]);
+}
+
 export function getDistanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -55,6 +67,8 @@ function resolveEmojiAndLabel(tags = {}) {
   if (
     cuisine.includes('ramen') ||
     cuisine.includes('noodle') ||
+    cuisine.includes('lomi') ||
+    cuisine.includes('goto') ||
     cuisine.includes('japanese') ||
     cuisine.includes('korean') ||
     name.includes('samgyup')
@@ -71,22 +85,22 @@ function resolveEmojiAndLabel(tags = {}) {
 }
 
 export async function fetchNearbyRestaurants(userLat, userLng, radiusMeters = 1500) {
-  const query = `
-    [out:json][timeout:15];
-    (
-      node["amenity"~"restaurant|fast_food|cafe|food_court|ice_cream|bakery"](around:${radiusMeters},${userLat},${userLng});
-      way["amenity"~"restaurant|fast_food|cafe|food_court"](around:${radiusMeters},${userLat},${userLng});
-    );
-    out center 80;
-  `;
+  const query = `[out:json][timeout:10];(node["amenity"~"restaurant|fast_food|cafe|food_court|ice_cream|bakery"](around:${radiusMeters},${userLat},${userLng});way["amenity"~"restaurant|fast_food|cafe|food_court"](around:${radiusMeters},${userLat},${userLng}););out center 80;`;
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        body: 'data=' + encodeURIComponent(query),
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      });
+      const res = await fetchWithTimeout(
+        endpoint,
+        {
+          method: 'POST',
+          body: 'data=' + encodeURIComponent(query),
+          headers: {
+            ...HEADERS,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        },
+        7000
+      );
       if (!res.ok) continue;
       const data = await res.json();
       if (data && data.elements && data.elements.length > 0) {
@@ -142,13 +156,51 @@ function parseOverpassElements(elements, userLat, userLng) {
 
 export async function searchPlacesByQuery(queryText, userLat, userLng) {
   if (!queryText || !queryText.trim()) return [];
+  const results = [];
+
+  // 1. Nominatim Local/Global Search (Great for Philippines local places)
   try {
-    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryText)}&lat=${userLat}&lon=${userLng}&limit=20`;
-    const res = await fetch(url);
+    const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+      queryText
+    )}&limit=15&addressdetails=1`;
+    const res = await fetchWithTimeout(nomUrl, { headers: HEADERS }, 5500);
+    const data = await res.json();
+    if (Array.isArray(data)) {
+      data.forEach((item, idx) => {
+        const lat = parseFloat(item.lat);
+        const lng = parseFloat(item.lon);
+        if (isNaN(lat) || isNaN(lng)) return;
+        const name = (item.display_name || queryText).split(',')[0];
+        const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
+        const { emoji, label, category } = resolveEmojiAndLabel({
+          amenity: item.type,
+          name
+        });
+        results.push({
+          id: `nom_${item.place_id || idx}`,
+          name,
+          lat,
+          lng,
+          category,
+          emoji,
+          typeLabel: label,
+          address: (item.display_name || '').split(',').slice(1, 3).join(',').trim() || 'Pinned Location',
+          distanceMeters: distMeters,
+          distanceText: formatDistance(distMeters),
+          walkMinutes: Math.max(1, Math.round(distMeters / 78))
+        });
+      });
+    }
+  } catch (e) {}
+
+  // 2. Photon Search
+  try {
+    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(queryText)}&lat=${userLat}&lon=${userLng}&limit=15`;
+    const res = await fetchWithTimeout(url, { headers: HEADERS }, 5500);
     const data = await res.json();
 
     if (data && data.features) {
-      const results = data.features.map((f, idx) => {
+      data.features.forEach((f, idx) => {
         const [lng, lat] = f.geometry.coordinates;
         const props = f.properties || {};
         const name = props.name || props.street || queryText;
@@ -159,7 +211,7 @@ export async function searchPlacesByQuery(queryText, userLat, userLng) {
           name
         });
 
-        return {
+        results.push({
           id: `search_${props.osm_id || idx}`,
           name,
           lat,
@@ -171,12 +223,12 @@ export async function searchPlacesByQuery(queryText, userLat, userLng) {
           distanceMeters: distMeters,
           distanceText: formatDistance(distMeters),
           walkMinutes: Math.max(1, Math.round(distMeters / 78))
-        };
+        });
       });
-      return results.sort((a, b) => a.distanceMeters - b.distanceMeters);
     }
   } catch (e) {}
-  return [];
+
+  return results.sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
 export function recalculateDistances(places, userLat, userLng) {
@@ -196,6 +248,7 @@ export function recalculateDistances(places, userLat, userLng) {
 function generateFallbackPlaces(lat, lng) {
   const samples = [
     { name: 'Jollibee Plaza', dLat: 0.0024, dLng: 0.0018, emoji: '🍔', typeLabel: 'Fast Food', category: 'fast_food' },
+    { name: 'McDonald\'s Highway', dLat: -0.0035, dLng: 0.0041, emoji: '🍔', typeLabel: 'Fast Food', category: 'fast_food' },
     { name: 'Tokyo Ramen House', dLat: -0.0019, dLng: 0.0028, emoji: '🍜', typeLabel: 'Asian & Noodles', category: 'restaurant' },
     { name: 'Cloud 9 Specialty Café & Boba', dLat: 0.0031, dLng: -0.0021, emoji: '☕', typeLabel: 'Café & Milk Tea', category: 'cafe' },
     { name: 'Mang Inasal Grill Hub', dLat: -0.0032, dLng: -0.0015, emoji: '🍗', typeLabel: 'Grill & Chicken', category: 'restaurant' },
@@ -214,7 +267,7 @@ function generateFallbackPlaces(lat, lng) {
       category: s.category,
       emoji: s.emoji,
       typeLabel: s.typeLabel,
-      address: 'Main Avenue District',
+      address: 'Nearby Main Road',
       distanceMeters: dist,
       distanceText: formatDistance(dist),
       walkMinutes: Math.max(1, Math.round(dist / 78))

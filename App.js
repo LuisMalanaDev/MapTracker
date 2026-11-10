@@ -93,6 +93,7 @@ export default function App() {
   // Start Native Hardware GPS Tracking
   useEffect(() => {
     let subscription = null;
+    let initialLoaded = false;
 
     (async () => {
       try {
@@ -103,31 +104,46 @@ export default function App() {
           return;
         }
 
-        const initial = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.High
-        });
-        const initLat = initial.coords.latitude;
-        const initLng = initial.coords.longitude;
+        // 1. Instant last known position so it never hangs indoors
+        const lastKnown = await Location.getLastKnownPositionAsync();
+        if (lastKnown && lastKnown.coords) {
+          initialLoaded = true;
+          setUserPos({
+            lat: lastKnown.coords.latitude,
+            lng: lastKnown.coords.longitude
+          });
+          setGpsStatus('Live GPS Locked');
+          loadNearby(lastKnown.coords.latitude, lastKnown.coords.longitude, radiusMeters);
+        }
 
-        setUserPos({ lat: initLat, lng: initLng });
-        setGpsStatus('Live GPS Locked');
-        loadNearby(initLat, initLng, radiusMeters);
-
+        // 2. Continuous live GPS stream
         subscription = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.BestForNavigation,
+            accuracy: Location.Accuracy.Balanced,
             timeInterval: 1000,
             distanceInterval: 1
           },
           (loc) => {
-            if (simTimerRef.current) return; // Ignore hardware GPS while Walk Simulator is running
-            setUserPos({
-              lat: loc.coords.latitude,
-              lng: loc.coords.longitude
-            });
+            if (simTimerRef.current) return;
+            const lat = loc.coords.latitude;
+            const lng = loc.coords.longitude;
+            setUserPos({ lat, lng });
             setGpsStatus('Live GPS Tracking');
+
+            if (!initialLoaded) {
+              initialLoaded = true;
+              loadNearby(lat, lng, radiusMeters);
+            }
           }
         );
+
+        // 3. Safety fallback if indoors and no GPS fix after 3.5 seconds
+        setTimeout(() => {
+          if (!initialLoaded) {
+            initialLoaded = true;
+            loadNearby(userPos.lat, userPos.lng, radiusMeters);
+          }
+        }, 3500);
       } catch (e) {
         setGpsStatus('GPS Fallback');
         loadNearby(13.9414, 121.6234, radiusMeters);

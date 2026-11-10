@@ -15,7 +15,7 @@ const MAP_HTML = `
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body, #map { width: 100%; height: 100%; background: #0d1117; overflow: hidden; }
+    html, body, #map { width: 100vw; height: 100vh; background: #161f30; overflow: hidden; }
     .tile-dark-filter { filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%); }
     .leaflet-marker-icon.user-gps-marker { transition: transform 0.55s linear; }
     .user-gps-dot {
@@ -75,10 +75,18 @@ const MAP_HTML = `
     }
     applyTile(currentStyle);
 
+    setTimeout(() => {
+      map.invalidateSize();
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MAP_READY' }));
+      }
+    }, 250);
+
     map.on('dragstart', () => { followUser = false; });
 
     function handleCommand(msg) {
       if (!msg || !msg.type) return;
+      map.invalidateSize();
 
       if (msg.type === 'UPDATE_USER') {
         const latLng = [msg.lat, msg.lng];
@@ -191,7 +199,8 @@ const MapCanvas = forwardRef(({ onSelectPlaceId, onMapReady }, ref) => {
 
   const sendCommand = (payload) => {
     if (webviewRef.current) {
-      webviewRef.current.postMessage(JSON.stringify(payload));
+      const json = JSON.stringify(payload);
+      webviewRef.current.injectJavaScript(`handleCommand(${json}); true;`);
     }
   };
 
@@ -211,28 +220,33 @@ const MapCanvas = forwardRef(({ onSelectPlaceId, onMapReady }, ref) => {
       <WebView
         ref={webviewRef}
         originWhitelist={['*']}
-        source={{ html: MAP_HTML }}
+        source={{ html: MAP_HTML, baseUrl: 'https://openstreetmap.org' }}
         style={styles.webview}
-        onLoadEnd={() => onMapReady && onMapReady()}
+        mixedContentMode="always"
+        allowFileAccess
+        allowUniversalAccessFromFileURLs
+        javaScriptEnabled
+        domStorageEnabled
+        geolocationEnabled
         onMessage={(event) => {
           try {
             const data = JSON.parse(event.nativeEvent.data);
+            if (data.type === 'MAP_READY' && onMapReady) {
+              onMapReady();
+            }
             if (data.type === 'SELECT_PLACE' && onSelectPlaceId) {
               onSelectPlaceId(data.placeId);
             }
           } catch (e) {}
         }}
-        javaScriptEnabled
-        domStorageEnabled
-        geolocationEnabled
       />
     </View>
   );
 });
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0d1117' },
-  webview: { flex: 1, backgroundColor: 'transparent' }
+  container: { flex: 1, backgroundColor: '#161f30' },
+  webview: { flex: 1, backgroundColor: '#161f30' }
 });
 
 export default MapCanvas;
