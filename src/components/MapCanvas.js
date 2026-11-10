@@ -304,27 +304,66 @@ const SELF_CONTAINED_MAP_HTML = `
       }
     }
 
-    // Touch Pan Dragging
+    // Touch Pan Dragging, Pinch-to-Zoom & Tap-on-Map to Route
     let isDragging = false;
+    let didMove = false;
+    let startX = 0;
+    let startY = 0;
     let lastX = 0;
     let lastY = 0;
+    let initialPinchDist = null;
     const vp = document.getElementById('viewport');
+
+    function screenToLatLng(sx, sy) {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const cx = lng2tileX(centerLng, zoom) + (sx - w / 2) / 256;
+      const cy = lat2tileY(centerLat, zoom) + (sy - h / 2) / 256;
+      return {
+        lat: tileY2lat(cy, zoom),
+        lng: tileX2lng(cx, zoom)
+      };
+    }
 
     vp.addEventListener('touchstart', (e) => {
       if (e.touches.length === 1) {
         isDragging = true;
-        lastX = e.touches[0].clientX;
-        lastY = e.touches[0].clientY;
+        didMove = false;
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+        lastX = startX;
+        lastY = startY;
+      } else if (e.touches.length === 2) {
+        isDragging = false;
+        didMove = true;
+        initialPinchDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
       }
     });
 
     vp.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2 && initialPinchDist) {
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        if (Math.abs(dist - initialPinchDist) > 42) {
+          changeZoom(dist > initialPinchDist ? 1 : -1);
+          initialPinchDist = dist;
+        }
+        return;
+      }
       if (!isDragging || e.touches.length !== 1) return;
       const dx = e.touches[0].clientX - lastX;
       const dy = e.touches[0].clientY - lastY;
       lastX = e.touches[0].clientX;
       lastY = e.touches[0].clientY;
-      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+      if (Math.abs(e.touches[0].clientX - startX) > 8 || Math.abs(e.touches[0].clientY - startY) > 8) {
+        didMove = true;
+      }
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
         followUser = false;
         const cx = lng2tileX(centerLng, zoom) - dx / 256;
         const cy = lat2tileY(centerLat, zoom) - dy / 256;
@@ -334,7 +373,23 @@ const SELF_CONTAINED_MAP_HTML = `
       }
     });
 
-    vp.addEventListener('touchend', () => { isDragging = false; });
+    vp.addEventListener('touchend', (e) => {
+      initialPinchDist = null;
+      if (isDragging && !didMove && e.changedTouches && e.changedTouches.length === 1) {
+        const target = e.target;
+        if (!target.closest || (!target.closest('.poi-pin') && !target.closest('.zoom-btn'))) {
+          const tx = e.changedTouches[0].clientX;
+          const ty = e.changedTouches[0].clientY;
+          const coords = screenToLatLng(tx, ty);
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(
+              JSON.stringify({ type: 'MAP_TAP', lat: coords.lat, lng: coords.lng })
+            );
+          }
+        }
+      }
+      isDragging = false;
+    });
 
     window.handleCommand = function(msg) {
       if (!msg || !msg.type) return;
@@ -399,6 +454,7 @@ const MapCanvas = forwardRef(
       remainingCoords,
       walkedCoords,
       onSelectPlaceId,
+      onMapTap,
       onMapReady
     },
     ref
@@ -472,6 +528,9 @@ const MapCanvas = forwardRef(
               const data = JSON.parse(event.nativeEvent.data);
               if (data.type === 'SELECT_PLACE' && onSelectPlaceId) {
                 onSelectPlaceId(data.placeId);
+              }
+              if (data.type === 'MAP_TAP' && onMapTap) {
+                onMapTap(data.lat, data.lng);
               }
             } catch (e) {}
           }}

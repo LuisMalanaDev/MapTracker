@@ -25,7 +25,8 @@ import MapCanvas from './src/components/MapCanvas';
 import {
   fetchNearbyRestaurants,
   searchPlacesByQuery,
-  recalculateDistances
+  recalculateDistances,
+  reverseGeocodePoint
 } from './src/services/placesService';
 import {
   calculateStreetRoute,
@@ -206,11 +207,15 @@ export default function App() {
     setLoadingPlaces(false);
   }
 
-  // Remote search debounce
+  // Remote Google Maps + Multi-Engine Search
   useEffect(() => {
-    if (searchQuery.trim().length < 3) return;
+    if (searchQuery.trim().length < 2) return;
+    let cancelled = false;
+    setLoadingPlaces(true);
+
     const timer = setTimeout(async () => {
       const results = await searchPlacesByQuery(searchQuery.trim(), userPos.lat, userPos.lng);
+      if (cancelled) return;
       if (results.length > 0) {
         setAllPlaces((prev) => {
           const ids = new Set(prev.map((p) => p.id));
@@ -221,23 +226,41 @@ export default function App() {
           return recalculateDistances(merged, userPos.lat, userPos.lng);
         });
       }
-    }, 450);
-    return () => clearTimeout(timer);
+      setLoadingPlaces(false);
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [searchQuery]);
 
+  const normalizeStr = (s) =>
+    String(s || '')
+      .toLowerCase()
+      .replace(/['’`\-.,]/g, '');
+
   const filteredPlaces = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = normalizeStr(searchQuery.trim());
     return allPlaces.filter((p) => {
       if (activeCategory === 'favorites' && !favorites.includes(p.id)) return false;
       if (activeCategory !== 'all' && activeCategory !== 'favorites' && p.category !== activeCategory) {
         return false;
       }
-      if (q && !p.name.toLowerCase().includes(q) && !p.typeLabel.toLowerCase().includes(q)) {
-        return false;
+      if (q) {
+        const hay = normalizeStr(`${p.name} ${p.typeLabel} ${p.address}`);
+        const words = q.split(/\s+/).filter(Boolean);
+        return words.every((w) => hay.includes(w));
       }
       return true;
     });
   }, [allPlaces, activeCategory, searchQuery, favorites]);
+
+  async function handleMapTap(lat, lng) {
+    const spot = await reverseGeocodePoint(lat, lng, userPos.lat, userPos.lng);
+    setAllPlaces((prev) => recalculateDistances([spot, ...prev], userPos.lat, userPos.lng));
+    startNavigation(spot);
+  }
 
   // Update map markers whenever filteredPlaces or selectedPlace changes
   useEffect(() => {
@@ -350,6 +373,7 @@ export default function App() {
             const found = allPlaces.find((p) => p.id === placeId);
             if (found) startNavigation(found);
           }}
+          onMapTap={handleMapTap}
         />
       </View>
 
