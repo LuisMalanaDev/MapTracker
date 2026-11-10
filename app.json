@@ -1,7 +1,8 @@
 {
   "expo": {
     "name": "CraveNav Tracker",
-    "slug": "cravenav-map-tracker",
+    "owner": "luismalana0428",
+    "slug": "tracker",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -24,7 +25,9 @@
         "INTERNET",
         "VIBRATE",
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION"
+        "ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ]
     },
     "plugins": [
@@ -34,6 +37,11 @@
           "locationAlwaysAndWhenInUsePermission": "Allow CraveNav to access your live GPS location to find nearby restaurants, hotels, and guide your walk."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "c92847e3-9899-4756-95e2-6710630089c2"
+      }
+    }
   }
 }
