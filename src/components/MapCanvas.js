@@ -159,6 +159,7 @@ const SELF_CONTAINED_MAP_HTML = `
     let zoom = 16;
     let userLat = 13.9414;
     let userLng = 121.6234;
+    let userHeading = 0;
     let radiusMeters = 1500;
     let places = [];
     let selectedId = null;

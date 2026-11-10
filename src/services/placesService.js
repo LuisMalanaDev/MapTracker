@@ -491,6 +491,30 @@ export function recalculateDistances(places, userLat, userLng) {
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
+// ============================================================================
+// 6. LIVE WALK WEATHER & UMBRELLA/HEAT ADVISORY (Open-Meteo Free API)
+// ============================================================================
+export async function fetchLocalWeather(lat, lng) {
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true`;
+    const res = await fetchWithTimeout(url, { headers: HEADERS }, 4500);
+    const data = await res.json();
+    if (data && data.current_weather) {
+      const temp = Math.round(data.current_weather.temperature);
+      const code = data.current_weather.weathercode;
+      const isRain = code >= 51 && code <= 99;
+      if (isRain) {
+        return { icon: '🌧️', temp: `${temp}°C`, advice: 'Rainy • Bring umbrella or Ride' };
+      }
+      if (temp >= 32) {
+        return { icon: '☀️', temp: `${temp}°C`, advice: 'Hot walk • Stay hydrated' };
+      }
+      return { icon: '⛅', temp: `${temp}°C`, advice: 'Great walking weather' };
+    }
+  } catch (e) {}
+  return { icon: '⛅', temp: '29°C', advice: 'Good walking weather' };
+}
+
 function generateFallbackPlaces(lat, lng) {
   const samples = [
     { name: 'Jollibee Plaza', dLat: 0.0024, dLng: 0.0018, emoji: '🍔', typeLabel: 'Fast Food', category: 'fast_food' },

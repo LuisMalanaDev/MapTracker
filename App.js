@@ -1,5 +1,7 @@
 // ============================================================================
 // App.js — CraveNav Expo (React Native) Live Restaurant & Walking Path Tracker
+// Includes: Live Compass Arrow, Craving Pills, Haptic Vibrations, Share ETA,
+//           Live Weather Advisory & Personal Food Diary (Ratings + Notes)
 // ============================================================================
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
@@ -13,7 +15,9 @@ import {
   Modal,
   SafeAreaView,
   Platform,
-  StatusBar as RNStatusBar
+  StatusBar as RNStatusBar,
+  Vibration,
+  Share
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
@@ -26,12 +30,15 @@ import {
   fetchNearbyRestaurants,
   searchPlacesByQuery,
   recalculateDistances,
-  reverseGeocodePoint
+  reverseGeocodePoint,
+  fetchLocalWeather
 } from './src/services/placesService';
 import {
   calculateStreetRoute,
   computeLiveWalkState,
-  interpolateRouteSteps
+  interpolateRouteSteps,
+  calculateBearing,
+  getCompassGuidance
 } from './src/services/routeService';
 
 const CATEGORIES = [
@@ -39,7 +46,18 @@ const CATEGORIES = [
   { id: 'restaurant', label: '🍜 Restaurants' },
   { id: 'fast_food', label: '🍔 Fast Food' },
   { id: 'cafe', label: '☕ Cafés & Boba' },
-  { id: 'favorites', label: '❤️ Saved' }
+  { id: 'favorites', label: '❤️ Saved' },
+  { id: 'tried', label: '✅ Tried' }
+];
+
+const CRAVINGS = [
+  { id: 'lomi', label: '🍜 Lomi & Goto', query: 'lomi goto mami' },
+  { id: 'samgyup', label: '🥩 Samgyup & Wings', query: 'samgyup unli wings bbq' },
+  { id: 'boba', label: '🧋 Milk Tea & Coffee', query: 'milk tea cafe coffee' },
+  { id: 'pares', label: '🍲 Pares & Silog', query: 'pares silog eatery' },
+  { id: 'pizza', label: '🍕 Pizza & Pasta', query: 'pizza pasta' },
+  { id: 'burger', label: '🍔 Burgers & Fries', query: 'burger fast food' },
+  { id: 'dessert', label: '🍰 Desserts & Bakery', query: 'bakery ice cream cake' }
 ];
 
 const RADII = [
@@ -58,16 +76,20 @@ export default function App() {
   const arrivedTriggeredRef = useRef(false);
 
   const [userPos, setUserPos] = useState({ lat: 13.9414, lng: 121.6234 });
+  const [heading, setHeading] = useState(0);
   const [gpsStatus, setGpsStatus] = useState('Locating...');
+  const [weather, setWeather] = useState({ icon: '⛅', temp: '29°C', advice: 'Good walking weather' });
   const [mapReady, setMapReady] = useState(false);
 
   const [allPlaces, setAllPlaces] = useState([]);
   const [loadingPlaces, setLoadingPlaces] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeCraving, setActiveCraving] = useState(null);
   const [activeCategory, setActiveCategory] = useState('all');
   const [radiusMeters, setRadiusMeters] = useState(1500);
   const [travelMode, setTravelMode] = useState('foot'); // 'foot' | 'driving'
   const [favorites, setFavorites] = useState([]);
+  const [diary, setDiary] = useState({}); // { [placeId]: { rating: 5, note: '...', visitedAt: '...' } }
   const [sheetMinimized, setSheetMinimized] = useState(false);
 
   // Active Navigation State
@@ -76,24 +98,35 @@ export default function App() {
   const [liveNav, setLiveNav] = useState(null);
   const [showStepsList, setShowStepsList] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [hapticsEnabled, setHapticsEnabled] = useState(true);
   const [isSimulating, setIsSimulating] = useState(false);
 
   // Modals
   const [rouletteWinner, setRouletteWinner] = useState(null);
   const [arrivalPlace, setArrivalPlace] = useState(null);
+  const [diaryModalPlace, setDiaryModalPlace] = useState(null);
+  const [draftRating, setDraftRating] = useState(5);
+  const [draftNote, setDraftNote] = useState('');
 
-  // Load saved favorites
+  // Load saved favorites & food diary
   useEffect(() => {
     AsyncStorage.getItem('cravenav_favs')
       .then((raw) => {
         if (raw) setFavorites(JSON.parse(raw));
       })
       .catch(() => {});
+
+    AsyncStorage.getItem('cravenav_diary')
+      .then((raw) => {
+        if (raw) setDiary(JSON.parse(raw));
+      })
+      .catch(() => {});
   }, []);
 
-  // Start Native Hardware GPS Tracking
+  // Start Native Hardware GPS + Compass Heading Tracking
   useEffect(() => {
-    let subscription = null;
+    let gpsSub = null;
+    let headingSub = null;
     let initialLoaded = false;
 
     (async () => {
@@ -105,20 +138,20 @@ export default function App() {
           return;
         }
 
-        // 1. Instant last known position so it never hangs indoors
+        // 1. Instant last known position
         const lastKnown = await Location.getLastKnownPositionAsync();
         if (lastKnown && lastKnown.coords) {
           initialLoaded = true;
-          setUserPos({
-            lat: lastKnown.coords.latitude,
-            lng: lastKnown.coords.longitude
-          });
+          const lat = lastKnown.coords.latitude;
+          const lng = lastKnown.coords.longitude;
+          setUserPos({ lat, lng });
           setGpsStatus('Live GPS Locked');
-          loadNearby(lastKnown.coords.latitude, lastKnown.coords.longitude, radiusMeters);
+          loadNearby(lat, lng, radiusMeters);
+          fetchLocalWeather(lat, lng).then(setWeather);
         }
 
         // 2. Continuous live GPS stream
-        subscription = await Location.watchPositionAsync(
+        gpsSub = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.Balanced,
             timeInterval: 1000,
@@ -134,11 +167,18 @@ export default function App() {
             if (!initialLoaded) {
               initialLoaded = true;
               loadNearby(lat, lng, radiusMeters);
+              fetchLocalWeather(lat, lng).then(setWeather);
             }
           }
         );
 
-        // 3. Safety fallback if indoors and no GPS fix after 3.5 seconds
+        // 3. Live Phone Compass Heading Watcher
+        headingSub = await Location.watchHeadingAsync((h) => {
+          const deg = h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
+          if (typeof deg === 'number') setHeading(Math.round(deg));
+        });
+
+        // 4. Safety fallback if indoors
         setTimeout(() => {
           if (!initialLoaded) {
             initialLoaded = true;
@@ -152,10 +192,27 @@ export default function App() {
     })();
 
     return () => {
-      if (subscription) subscription.remove();
+      if (gpsSub) gpsSub.remove();
+      if (headingSub) headingSub.remove();
       if (simTimerRef.current) clearInterval(simTimerRef.current);
     };
   }, []);
+
+  // Compute live compass arrow direction toward destination
+  const compassInfo = useMemo(() => {
+    if (!selectedPlace) return null;
+    const targetBearing = calculateBearing(
+      userPos.lat,
+      userPos.lng,
+      selectedPlace.lat,
+      selectedPlace.lng
+    );
+    const relativeDeg = (targetBearing - heading + 360) % 360;
+    return {
+      targetBearing: Math.round(targetBearing),
+      ...getCompassGuidance(relativeDeg)
+    };
+  }, [userPos, heading, selectedPlace]);
 
   // Sync user position with Map & Live Navigation Progress
   useEffect(() => {
@@ -178,19 +235,25 @@ export default function App() {
         setLiveNav(state);
         mapRef.current?.updateWalkPath(state.remainingCoords, state.walkedCoords);
 
-        if (
-          voiceEnabled &&
-          state.activeStepIdx !== lastSpokenStepRef.current &&
-          state.currentStep
-        ) {
+        // New Turn Step Reached -> Voice + Pocket Haptic Buzz!
+        if (state.activeStepIdx !== lastSpokenStepRef.current && state.currentStep) {
           lastSpokenStepRef.current = state.activeStepIdx;
-          Speech.stop();
-          Speech.speak(state.currentStep.instruction);
+          if (hapticsEnabled) {
+            Vibration.vibrate([0, 160, 100, 200]);
+          }
+          if (voiceEnabled) {
+            Speech.stop();
+            Speech.speak(state.currentStep.instruction);
+          }
         }
 
+        // Arrived at Restaurant -> Celebration Buzz + Modal!
         if (state.isArrived && !arrivedTriggeredRef.current) {
           arrivedTriggeredRef.current = true;
           stopWalkSimulator();
+          if (hapticsEnabled) {
+            Vibration.vibrate([0, 250, 120, 250, 120, 400]);
+          }
           setArrivalPlace(selectedPlace);
           if (voiceEnabled) {
             Speech.speak(`You have arrived at ${selectedPlace.name}. Enjoy your meal!`);
@@ -244,29 +307,58 @@ export default function App() {
     const q = normalizeStr(searchQuery.trim());
     return allPlaces.filter((p) => {
       if (activeCategory === 'favorites' && !favorites.includes(p.id)) return false;
-      if (activeCategory !== 'all' && activeCategory !== 'favorites' && p.category !== activeCategory) {
+      if (activeCategory === 'tried' && !diary[p.id]) return false;
+      if (
+        activeCategory !== 'all' &&
+        activeCategory !== 'favorites' &&
+        activeCategory !== 'tried' &&
+        p.category !== activeCategory
+      ) {
         return false;
       }
       if (q) {
         const hay = normalizeStr(`${p.name} ${p.typeLabel} ${p.address}`);
         const words = q.split(/\s+/).filter(Boolean);
-        return words.every((w) => hay.includes(w));
+        return words.some((w) => hay.includes(w));
       }
       return true;
     });
-  }, [allPlaces, activeCategory, searchQuery, favorites]);
+  }, [allPlaces, activeCategory, searchQuery, favorites, diary]);
 
-  async function handleMapTap(lat, lng) {
-    const spot = await reverseGeocodePoint(lat, lng, userPos.lat, userPos.lng);
-    setAllPlaces((prev) => recalculateDistances([spot, ...prev], userPos.lat, userPos.lng));
-    startNavigation(spot);
-  }
-
-  // Update map markers whenever filteredPlaces or selectedPlace changes
   useEffect(() => {
     if (!mapReady) return;
     mapRef.current?.renderPOIs(filteredPlaces, selectedPlace ? selectedPlace.id : null);
   }, [filteredPlaces, selectedPlace, mapReady]);
+
+  async function handleCravingPress(craving) {
+    if (activeCraving === craving.id) {
+      setActiveCraving(null);
+      setSearchQuery('');
+      return;
+    }
+    setActiveCraving(craving.id);
+    setLoadingPlaces(true);
+    const hits = await searchPlacesByQuery(craving.query, userPos.lat, userPos.lng);
+    if (hits.length > 0) {
+      setAllPlaces((prev) => {
+        const ids = new Set(prev.map((p) => p.id));
+        const merged = [...prev];
+        hits.forEach((r) => {
+          if (!ids.has(r.id)) merged.push(r);
+        });
+        return recalculateDistances(merged, userPos.lat, userPos.lng);
+      });
+    }
+    setSearchQuery(craving.query.split(' ')[0]);
+    setLoadingPlaces(false);
+  }
+
+  async function handleMapTap(lat, lng) {
+    if (hapticsEnabled) Vibration.vibrate(70);
+    const spot = await reverseGeocodePoint(lat, lng, userPos.lat, userPos.lng);
+    setAllPlaces((prev) => recalculateDistances([spot, ...prev], userPos.lat, userPos.lng));
+    startNavigation(spot);
+  }
 
   async function startNavigation(place, customMode = travelMode) {
     stopWalkSimulator();
@@ -274,6 +366,7 @@ export default function App() {
     lastSpokenStepRef.current = -1;
     setSelectedPlace(place);
     setSheetMinimized(true);
+    if (hapticsEnabled) Vibration.vibrate(60);
 
     const route = await calculateStreetRoute(userPos.lat, userPos.lng, place, customMode);
     setActiveRoute(route);
@@ -296,6 +389,41 @@ export default function App() {
     setShowStepsList(false);
     setSheetMinimized(false);
     mapRef.current?.clearRoute();
+  }
+
+  async function sharePlaceAndETA(place) {
+    if (!place) return;
+    const dist = liveNav ? liveNav.remainingText : place.distanceText;
+    const mins = liveNav ? liveNav.remainingMins : place.walkMinutes;
+    const gmapUrl = `https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lng}`;
+    try {
+      await Share.share({
+        message: `🍜 Heading to ${place.name} (${place.address})!\n📍 Distance: ${dist} away (~${mins} min)\n🗺️ Google Maps Pin: ${gmapUrl}`
+      });
+    } catch (e) {}
+  }
+
+  function openDiaryModal(place) {
+    const existing = diary[place.id] || { rating: 5, note: '' };
+    setDraftRating(existing.rating || 5);
+    setDraftNote(existing.note || '');
+    setDiaryModalPlace(place);
+  }
+
+  function saveDiaryEntry() {
+    if (!diaryModalPlace) return;
+    const nextDiary = {
+      ...diary,
+      [diaryModalPlace.id]: {
+        rating: draftRating,
+        note: draftNote.trim(),
+        visitedAt: new Date().toLocaleDateString()
+      }
+    };
+    setDiary(nextDiary);
+    AsyncStorage.setItem('cravenav_diary', JSON.stringify(nextDiary)).catch(() => {});
+    setDiaryModalPlace(null);
+    if (hapticsEnabled) Vibration.vibrate(60);
   }
 
   function toggleWalkSimulator() {
@@ -341,6 +469,7 @@ export default function App() {
   function spinRandomRestaurant() {
     const pool = filteredPlaces.length > 0 ? filteredPlaces : allPlaces;
     if (pool.length === 0) return;
+    if (hapticsEnabled) Vibration.vibrate(80);
     const pick = pool[Math.floor(Math.random() * pool.length)];
     setRouletteWinner(pick);
   }
@@ -366,9 +495,7 @@ export default function App() {
           selectedId={selectedPlace ? selectedPlace.id : null}
           remainingCoords={liveNav ? liveNav.remainingCoords : activeRoute ? activeRoute.coords : []}
           walkedCoords={liveNav ? liveNav.walkedCoords : []}
-          onMapReady={() => {
-            setMapReady(true);
-          }}
+          onMapReady={() => setMapReady(true)}
           onSelectPlaceId={(placeId) => {
             const found = allPlaces.find((p) => p.id === placeId);
             if (found) startNavigation(found);
@@ -394,7 +521,24 @@ export default function App() {
                 Destination: {selectedPlace.name}
               </Text>
             </View>
+            <TouchableOpacity
+              style={styles.shareHudBtn}
+              onPress={() => sharePlaceAndETA(selectedPlace)}
+            >
+              <Text style={{ fontSize: 16 }}>📤</Text>
+            </TouchableOpacity>
           </View>
+
+          {/* Feature 1: Live Compass "Just Follow the Arrow" Strip */}
+          {compassInfo && (
+            <View style={styles.compassBanner}>
+              <Text style={styles.compassArrow}>{compassInfo.arrow}</Text>
+              <Text style={styles.compassText}>
+                Compass: <Text style={{ color: '#fff', fontWeight: '800' }}>{compassInfo.label}</Text>{' '}
+                ({compassInfo.targetBearing}° • Facing {heading}°)
+              </Text>
+            </View>
+          )}
 
           {/* Live Shrinking Distance, ETA & Progress % */}
           <View style={styles.statsGrid}>
@@ -424,7 +568,7 @@ export default function App() {
               onPress={toggleWalkSimulator}
             >
               <Text style={styles.navBtnText}>
-                {isSimulating ? '⏸️ Pause Sim' : '🚶 Sim Walk'}
+                {isSimulating ? '⏸️ Pause' : '🚶 Sim Walk'}
               </Text>
             </TouchableOpacity>
 
@@ -440,6 +584,13 @@ export default function App() {
               onPress={() => setVoiceEnabled(!voiceEnabled)}
             >
               <Text style={styles.navBtnText}>{voiceEnabled ? '🔊 Voice' : '🔇 Mute'}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.navBtn}
+              onPress={() => setHapticsEnabled(!hapticsEnabled)}
+            >
+              <Text style={styles.navBtnText}>{hapticsEnabled ? '📳 Buzz' : '📴 Off'}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity style={[styles.navBtn, styles.stopBtn]} onPress={stopNavigation}>
@@ -493,7 +644,7 @@ export default function App() {
           <View style={styles.sheetHandle} />
         </TouchableOpacity>
 
-        {/* Brand Header */}
+        {/* Brand Header + Live Weather Badge */}
         <View style={styles.headerRow}>
           <View style={styles.brandGroup}>
             <View style={styles.brandIcon}>
@@ -501,7 +652,9 @@ export default function App() {
             </View>
             <View>
               <Text style={styles.brandTitle}>CraveNav</Text>
-              <Text style={styles.brandSub}>Live Restaurant & Path Tracker</Text>
+              <Text style={styles.brandSub}>
+                {weather.icon} {weather.temp} • {weather.advice}
+              </Text>
             </View>
           </View>
           <View style={styles.gpsBadge}>
@@ -518,13 +671,21 @@ export default function App() {
                 <Text style={{ marginRight: 6 }}>🔍</Text>
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="Search restaurants, Jollibee, café..."
+                  placeholder="Search any Google Maps restaurant..."
                   placeholderTextColor="#64748b"
                   value={searchQuery}
-                  onChangeText={setSearchQuery}
+                  onChangeText={(txt) => {
+                    setSearchQuery(txt);
+                    if (!txt) setActiveCraving(null);
+                  }}
                 />
                 {searchQuery.length > 0 && (
-                  <TouchableOpacity onPress={() => setSearchQuery('')}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSearchQuery('');
+                      setActiveCraving(null);
+                    }}
+                  >
                     <Text style={{ color: '#94a3b8', paddingHorizontal: 4 }}>✕</Text>
                   </TouchableOpacity>
                 )}
@@ -534,8 +695,37 @@ export default function App() {
               </TouchableOpacity>
             </View>
 
+            {/* Feature 2: 1-Tap "I'm Craving..." Quick Pills */}
+            <View style={{ height: 34, marginBottom: 4 }}>
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                data={CRAVINGS}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.chipsList}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={[
+                      styles.cravingChip,
+                      activeCraving === item.id && styles.cravingChipActive
+                    ]}
+                    onPress={() => handleCravingPress(item)}
+                  >
+                    <Text
+                      style={[
+                        styles.cravingText,
+                        activeCraving === item.id && styles.cravingTextActive
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              />
+            </View>
+
             {/* Category Chips */}
-            <View style={{ height: 42 }}>
+            <View style={{ height: 38 }}>
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -593,7 +783,7 @@ export default function App() {
             {/* Places List */}
             {loadingPlaces ? (
               <View style={styles.emptyBox}>
-                <Text style={styles.emptyText}>🔍 Scanning nearby restaurants...</Text>
+                <Text style={styles.emptyText}>🔍 Scanning Google Maps & nearby spots...</Text>
               </View>
             ) : (
               <FlatList
@@ -603,6 +793,7 @@ export default function App() {
                 renderItem={({ item }) => {
                   const isSel = selectedPlace && selectedPlace.id === item.id;
                   const isFav = favorites.includes(item.id);
+                  const diaryEntry = diary[item.id];
                   return (
                     <TouchableOpacity
                       style={[styles.placeCard, isSel && styles.placeCardSelected]}
@@ -619,6 +810,12 @@ export default function App() {
                           <Text style={styles.placeMeta} numberOfLines={1}>
                             {item.typeLabel} • {item.address}
                           </Text>
+                          {diaryEntry && (
+                            <Text style={styles.diaryBadge} numberOfLines={1}>
+                              ✅ Tried: {'⭐'.repeat(diaryEntry.rating)}{' '}
+                              {diaryEntry.note ? `— "${diaryEntry.note}"` : ''}
+                            </Text>
+                          )}
                         </View>
                         <View style={styles.distPill}>
                           <Text style={styles.distPillText}>{item.distanceText}</Text>
@@ -626,13 +823,18 @@ export default function App() {
                       </View>
 
                       <View style={styles.cardBottom}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                          <Text style={styles.etaLabel}>🚶 ~{item.walkMinutes} min walk</Text>
-                          <TouchableOpacity
-                            onPress={() => toggleFavorite(item.id)}
-                            style={{ marginLeft: 10 }}
-                          >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                          <Text style={styles.etaLabel}>🚶 ~{item.walkMinutes}m</Text>
+                          <TouchableOpacity onPress={() => toggleFavorite(item.id)}>
                             <Text style={{ fontSize: 15 }}>{isFav ? '❤️' : '🤍'}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => openDiaryModal(item)}>
+                            <Text style={{ fontSize: 13, color: '#fbbf24', fontWeight: '700' }}>
+                              {diaryEntry ? '📝 Edit Note' : '⭐ Rate'}
+                            </Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => sharePlaceAndETA(item)}>
+                            <Text style={{ fontSize: 14 }}>📤</Text>
                           </TouchableOpacity>
                         </View>
                         <View style={styles.goBtn}>
@@ -649,6 +851,48 @@ export default function App() {
           </>
         )}
       </View>
+
+      {/* Feature 6: Personal Food Diary / Rating Modal */}
+      <Modal visible={!!diaryModalPlace} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          {diaryModalPlace && (
+            <View style={styles.modalCard}>
+              <Text style={{ fontSize: 38, marginBottom: 6 }}>{diaryModalPlace.emoji}</Text>
+              <Text style={styles.modalTitle}>{diaryModalPlace.name}</Text>
+              <Text style={styles.modalSub}>Mark as Tried & Save Your Couple Food Note</Text>
+
+              {/* 1-5 Star Selector */}
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <TouchableOpacity key={star} onPress={() => setDraftRating(star)}>
+                    <Text style={{ fontSize: 28, opacity: star <= draftRating ? 1 : 0.25 }}>
+                      ⭐
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <TextInput
+                style={styles.diaryInput}
+                placeholder="What should we order next time? (e.g. Overload Lomi)"
+                placeholderTextColor="#64748b"
+                value={draftNote}
+                onChangeText={setDraftNote}
+              />
+
+              <TouchableOpacity style={styles.modalPrimaryBtn} onPress={saveDiaryEntry}>
+                <Text style={styles.modalPrimaryBtnText}>✅ Save to Food Diary</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setDiaryModalPlace(null)}
+                style={{ marginTop: 12 }}
+              >
+                <Text style={{ color: '#94a3b8', fontSize: 13 }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </Modal>
 
       {/* Random Restaurant Roulette Modal */}
       <Modal visible={!!rouletteWinner} transparent animationType="fade">
@@ -694,9 +938,19 @@ export default function App() {
               </Text>
               <TouchableOpacity
                 style={styles.modalPrimaryBtn}
-                onPress={() => setArrivalPlace(null)}
+                onPress={() => {
+                  const p = arrivalPlace;
+                  setArrivalPlace(null);
+                  openDiaryModal(p);
+                }}
               >
-                <Text style={styles.modalPrimaryBtnText}>Awesome, Let's Eat!</Text>
+                <Text style={styles.modalPrimaryBtnText}>⭐ Rate & Add Food Note</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setArrivalPlace(null)}
+                style={{ marginTop: 12 }}
+              >
+                <Text style={{ color: '#94a3b8', fontSize: 13 }}>Done</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -736,14 +990,14 @@ const styles = StyleSheet.create({
     top: Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) + 10 : 50,
     left: 12,
     right: 66,
-    backgroundColor: 'rgba(12, 18, 28, 0.95)',
+    backgroundColor: 'rgba(12, 18, 28, 0.96)',
     borderRadius: 16,
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.45)',
     padding: 12,
     zIndex: 30
   },
-  turnBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
+  turnBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
   turnIconBox: {
     width: 44,
     height: 44,
@@ -755,6 +1009,27 @@ const styles = StyleSheet.create({
   turnIconText: { fontSize: 22 },
   turnInstruction: { color: '#fff', fontSize: 14, fontWeight: '800' },
   turnSub: { color: '#34d399', fontSize: 11.5, marginTop: 2 },
+  shareHudBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  compassBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.35)',
+    borderRadius: 9,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    marginBottom: 8
+  },
+  compassArrow: { fontSize: 16, marginRight: 8 },
+  compassText: { color: '#93c5fd', fontSize: 11.5 },
   statsGrid: {
     flexDirection: 'row',
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -773,7 +1048,7 @@ const styles = StyleSheet.create({
     marginBottom: 10
   },
   progressFill: { height: '100%', backgroundColor: '#10b981' },
-  navControlsRow: { flexDirection: 'row', gap: 6 },
+  navControlsRow: { flexDirection: 'row', gap: 5 },
   navBtn: {
     flex: 1,
     paddingVertical: 7,
@@ -782,8 +1057,8 @@ const styles = StyleSheet.create({
     alignItems: 'center'
   },
   navBtnActive: { backgroundColor: 'rgba(59, 130, 246, 0.35)' },
-  stopBtn: { backgroundColor: 'rgba(239, 68, 68, 0.2)', flex: 0.7 },
-  navBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  stopBtn: { backgroundColor: 'rgba(239, 68, 68, 0.2)', flex: 0.75 },
+  navBtnText: { color: '#fff', fontSize: 10.5, fontWeight: '700' },
   stepsDrawer: {
     marginTop: 8,
     paddingTop: 8,
@@ -806,7 +1081,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    height: '48%',
+    height: '52%',
     backgroundColor: 'rgba(16, 22, 34, 0.96)',
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
@@ -827,7 +1102,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingBottom: 10
+    paddingBottom: 8
   },
   brandGroup: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   brandIcon: {
@@ -839,7 +1114,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center'
   },
   brandTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
-  brandSub: { color: '#94a3b8', fontSize: 11 },
+  brandSub: { color: '#38bdf8', fontSize: 11, fontWeight: '600' },
   gpsBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -858,7 +1133,7 @@ const styles = StyleSheet.create({
     marginRight: 6
   },
   gpsBadgeText: { color: '#34d399', fontSize: 11, fontWeight: '700' },
-  searchRow: { flexDirection: 'row', paddingHorizontal: 14, gap: 8, marginBottom: 8 },
+  searchRow: { flexDirection: 'row', paddingHorizontal: 14, gap: 8, marginBottom: 6 },
   searchBox: {
     flex: 1,
     flexDirection: 'row',
@@ -868,12 +1143,12 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
     borderRadius: 11,
     paddingHorizontal: 10,
-    height: 40
+    height: 38
   },
   searchInput: { flex: 1, color: '#fff', fontSize: 13 },
   rouletteBtn: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
     borderRadius: 11,
     backgroundColor: 'rgba(245, 158, 11, 0.22)',
     borderWidth: 1,
@@ -882,22 +1157,37 @@ const styles = StyleSheet.create({
     justifyContent: 'center'
   },
   chipsList: { paddingHorizontal: 14, alignItems: 'center', gap: 6 },
+  cravingChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+    marginRight: 6
+  },
+  cravingChipActive: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#60a5fa'
+  },
+  cravingText: { color: '#93c5fd', fontSize: 11, fontWeight: '600' },
+  cravingTextActive: { color: '#fff' },
   chip: {
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 5,
     borderRadius: 99,
     backgroundColor: 'rgba(255,255,255,0.06)',
     marginRight: 6
   },
   chipActive: { backgroundColor: '#ff5722' },
-  chipText: { color: '#94a3b8', fontSize: 12, fontWeight: '600' },
+  chipText: { color: '#94a3b8', fontSize: 11.5, fontWeight: '600' },
   chipTextActive: { color: '#fff' },
   subToolbar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 14,
-    paddingVertical: 6,
+    paddingVertical: 5,
     borderTopWidth: 1,
     borderBottomWidth: 1,
     borderColor: 'rgba(255,255,255,0.07)',
@@ -924,7 +1214,7 @@ const styles = StyleSheet.create({
   placeCard: {
     backgroundColor: 'rgba(26, 35, 52, 0.85)',
     borderRadius: 12,
-    padding: 12,
+    padding: 11,
     marginBottom: 8,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.07)'
@@ -944,6 +1234,7 @@ const styles = StyleSheet.create({
   },
   placeName: { color: '#fff', fontSize: 14, fontWeight: '700' },
   placeMeta: { color: '#94a3b8', fontSize: 11.5, marginTop: 2 },
+  diaryBadge: { color: '#fbbf24', fontSize: 11, fontWeight: '600', marginTop: 3 },
   distPill: {
     backgroundColor: 'rgba(59, 130, 246, 0.18)',
     borderWidth: 1,
@@ -993,7 +1284,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: 'center',
     marginTop: 6,
-    marginBottom: 18
+    marginBottom: 14
+  },
+  diaryInput: {
+    width: '100%',
+    backgroundColor: 'rgba(10, 14, 23, 0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#fff',
+    fontSize: 13,
+    marginBottom: 14
   },
   modalPrimaryBtn: {
     width: '100%',

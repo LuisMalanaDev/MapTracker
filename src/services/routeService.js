@@ -185,3 +185,25 @@ export function interpolateRouteSteps(coords, maxStepDeg = 0.00012) {
   result.push(coords[coords.length - 1]);
   return result;
 }
+
+// Calculates exact compass bearing (0-360 deg) from point A to point B
+export function calculateBearing(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const toDeg = (r) => (r * 180) / Math.PI;
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+export function getCompassGuidance(relativeDeg) {
+  const norm = ((relativeDeg % 360) + 360) % 360;
+  if (norm <= 28 || norm >= 332) return { arrow: '⬆️', label: 'Straight Ahead' };
+  if (norm > 28 && norm <= 75) return { arrow: '↗️', label: 'Bear Right' };
+  if (norm > 75 && norm <= 125) return { arrow: '➡️', label: 'To Your Right' };
+  if (norm >= 235 && norm < 285) return { arrow: '⬅️', label: 'To Your Left' };
+  if (norm >= 285 && norm < 332) return { arrow: '↖️', label: 'Bear Left' };
+  return { arrow: '↩️', label: 'Behind You (Turn Around)' };
+}
