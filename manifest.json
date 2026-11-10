@@ -2,7 +2,7 @@
   "name": "CraveNav — Live Restaurant & Walking Tracker",
   "short_name": "CraveNav",
   "description": "Real-time GPS restaurant radar, street routing, and live walking navigation tracker.",
-  "start_url": "/index.html",
+  "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0b0f17",
   "theme_color": "#ff5722",

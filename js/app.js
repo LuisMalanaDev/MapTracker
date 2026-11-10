@@ -33,7 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Register Service Worker for PWA
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
 
   // 2. Listen for Live GPS Updates

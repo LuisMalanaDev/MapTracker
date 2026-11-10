@@ -1,14 +1,14 @@
-const CACHE_NAME = 'cravenav-v3';
+const CACHE_NAME = 'cravenav-v4';
 const ASSETS = [
-  '/',
-  '/index.html',
-  '/css/styles.css',
-  '/js/app.js',
-  '/js/map.js',
-  '/js/gps.js',
-  '/js/places.js',
-  '/js/router.js',
-  '/manifest.json'
+  './',
+  './index.html',
+  './css/styles.css',
+  './js/app.js',
+  './js/map.js',
+  './js/gps.js',
+  './js/places.js',
+  './js/router.js',
+  './manifest.json'
 ];
 
 self.addEventListener('install', (event) => {
