@@ -21,6 +21,8 @@
         "backgroundColor": "#ff5722"
       },
       "permissions": [
+        "INTERNET",
+        "VIBRATE",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION"
       ]
@@ -29,10 +31,9 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow CraveNav to access your live GPS location to find nearby restaurants and guide your walk."
+          "locationAlwaysAndWhenInUsePermission": "Allow CraveNav to access your live GPS location to find nearby restaurants, hotels, and guide your walk."
         }
-      ],
-      "expo-status-bar"
+      ]
     ]
   }
 }
