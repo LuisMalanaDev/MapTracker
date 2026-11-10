@@ -31,7 +31,8 @@
         {
           "locationAlwaysAndWhenInUsePermission": "Allow CraveNav to access your live GPS location to find nearby restaurants and guide your walk."
         }
-      ]
+      ],
+      "expo-status-bar"
     ]
   }
 }
