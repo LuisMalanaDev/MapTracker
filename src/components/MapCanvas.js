@@ -43,9 +43,12 @@ const SELF_CONTAINED_MAP_HTML = `
     #markerContainer { pointer-events: none; z-index: 3; }
     .map-tile {
       position: absolute;
+      top: 0;
+      left: 0;
       width: 256px;
       height: 256px;
       pointer-events: none;
+      will-change: transform;
     }
     .dark-tile {
       filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
@@ -60,6 +63,50 @@ const SELF_CONTAINED_MAP_HTML = `
       pointer-events: none;
       transition: left 0.35s linear, top 0.35s linear;
     }
+    .user-heading-rotor {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 24px;
+      height: 24px;
+      transition: transform 0.18s linear;
+      will-change: transform;
+    }
+    /* Google Maps-style forward flashlight cone */
+    .user-beam {
+      position: absolute;
+      left: -14px;
+      top: -36px;
+      width: 52px;
+      height: 44px;
+      background: linear-gradient(to top, rgba(59, 130, 246, 0.55), rgba(59, 130, 246, 0.0));
+      clip-path: polygon(50% 100%, 8% 0%, 92% 0%);
+      -webkit-clip-path: polygon(50% 100%, 8% 0%, 92% 0%);
+    }
+    /* Crisp directional arrow pointer on the blue circle */
+    .user-arrow {
+      position: absolute;
+      left: 5px;
+      top: -9px;
+      width: 0;
+      height: 0;
+      border-left: 7px solid transparent;
+      border-right: 7px solid transparent;
+      border-bottom: 11px solid #2563eb;
+      filter: drop-shadow(0 -1px 1px #ffffff) drop-shadow(0 1px 3px rgba(0,0,0,0.45));
+      z-index: 3;
+    }
+    .user-arrow-inner {
+      position: absolute;
+      left: 7px;
+      top: -7px;
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-bottom: 8px solid #ffffff;
+      z-index: 4;
+    }
     .user-dot {
       width: 18px;
       height: 18px;
@@ -70,6 +117,7 @@ const SELF_CONTAINED_MAP_HTML = `
       top: 3px;
       left: 3px;
       box-shadow: 0 0 12px rgba(59,130,246,0.95);
+      z-index: 2;
     }
     .user-pulse {
       width: 44px;
@@ -114,10 +162,40 @@ const SELF_CONTAINED_MAP_HTML = `
       transform: rotate(45deg);
       font-size: 18px;
     }
+    .pin-label {
+      position: absolute;
+      transform: translate(-50%, -58px);
+      background: rgba(11, 15, 23, 0.92);
+      color: #ffffff;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+      border: 1.5px solid #10b981;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+      pointer-events: none;
+      z-index: 950;
+    }
+    .you-label {
+      position: absolute;
+      transform: translate(-50%, -28px);
+      background: rgba(37, 99, 235, 0.92);
+      color: #ffffff;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 800;
+      white-space: nowrap;
+      border: 1px solid #ffffff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+      pointer-events: none;
+      z-index: 1000;
+    }
     .zoom-controls {
       position: absolute;
-      left: 12px;
-      top: 12px;
+      right: 14px;
+      top: 126px;
       z-index: 10;
       display: flex;
       flex-direction: column;
@@ -168,12 +246,23 @@ const SELF_CONTAINED_MAP_HTML = `
     let walkedRoute = [];
     let followUser = true;
     let tileStyle = 0; // 0: Google Street, 1: Dark Mode, 2: Google Satellite
+    let rafPending = false;
+    const tilePool = new Map();
 
     const TILE_URLS = [
       (x, y, z) => 'https://mt1.google.com/vt/lyrs=m&x=' + x + '&y=' + y + '&z=' + z,
       (x, y, z) => 'https://mt1.google.com/vt/lyrs=m&x=' + x + '&y=' + y + '&z=' + z,
       (x, y, z) => 'https://mt1.google.com/vt/lyrs=y&x=' + x + '&y=' + y + '&z=' + z
     ];
+
+    function scheduleRender() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        renderNow();
+      });
+    }
 
     function lng2tileX(lon, z) {
       return ((lon + 180) / 360) * Math.pow(2, z);
@@ -203,7 +292,7 @@ const SELF_CONTAINED_MAP_HTML = `
       };
     }
 
-    function render() {
+    function renderNow() {
       const w = window.innerWidth;
       const h = window.innerHeight;
       if (routeCanvas.width !== w || routeCanvas.height !== h) {
@@ -211,7 +300,7 @@ const SELF_CONTAINED_MAP_HTML = `
         routeCanvas.height = h;
       }
 
-      // 1. Render Tiles
+      // 1. Render Tiles with DOM Pooling (Zero innerHTML destruction during drag!)
       const centerX = lng2tileX(centerLng, zoom);
       const centerY = lat2tileY(centerLat, zoom);
       const startX = Math.floor(centerX - (w / 2) / 256) - 1;
@@ -220,35 +309,59 @@ const SELF_CONTAINED_MAP_HTML = `
       const endY = Math.floor(centerY + (h / 2) / 256) + 1;
       const maxTile = Math.pow(2, zoom);
 
-      let tilesHtml = '';
       const isDark = tileStyle === 1;
+      const activeKeys = new Set();
+
       for (let x = startX; x <= endX; x++) {
         for (let y = startY; y <= endY; y++) {
           if (y < 0 || y >= maxTile) continue;
           const wrappedX = ((x % maxTile) + maxTile) % maxTile;
+          const key = tileStyle + ':' + zoom + ':' + x + ':' + y;
+          activeKeys.add(key);
+
           const left = Math.round(w / 2 + (x - centerX) * 256);
           const top = Math.round(h / 2 + (y - centerY) * 256);
-          const src = TILE_URLS[tileStyle](wrappedX, y, zoom);
-          tilesHtml += '<img class="map-tile ' + (isDark ? 'dark-tile' : '') + '" src="' + src + '" style="left:' + left + 'px;top:' + top + 'px;" />';
+
+          let img = tilePool.get(key);
+          if (!img) {
+            img = document.createElement('img');
+            img.className = 'map-tile' + (isDark ? ' dark-tile' : '');
+            img.decoding = 'async';
+            img.src = TILE_URLS[tileStyle](wrappedX, y, zoom);
+            tileContainer.appendChild(img);
+            tilePool.set(key, img);
+          }
+          img.style.transform = 'translate3d(' + left + 'px,' + top + 'px,0)';
         }
       }
-      tileContainer.innerHTML = tilesHtml;
+
+      // Prune off-screen tiles
+      tilePool.forEach((img, key) => {
+        if (!activeKeys.has(key)) {
+          if (img.parentNode) img.parentNode.removeChild(img);
+          tilePool.delete(key);
+        }
+      });
 
       // 2. Render Route & Radar Circle on Canvas
       ctx.clearRect(0, 0, w, h);
       const uPt = latLngToScreen(userLat, userLng);
-      const metersPerPixel = (156543.03392 * Math.cos((userLat * Math.PI) / 180)) / Math.pow(2, zoom);
-      const radPx = radiusMeters / metersPerPixel;
 
-      ctx.beginPath();
-      ctx.arc(uPt.x, uPt.y, radPx, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255, 87, 34, 0.65)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 6]);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(255, 87, 34, 0.04)';
-      ctx.fill();
-      ctx.setLineDash([]);
+      // Only draw radar scan circle when browsing (hide when focusing on a single chosen destination)
+      if (!selectedId) {
+        const metersPerPixel = (156543.03392 * Math.cos((userLat * Math.PI) / 180)) / Math.pow(2, zoom);
+        const radPx = radiusMeters / metersPerPixel;
+
+        ctx.beginPath();
+        ctx.arc(uPt.x, uPt.y, radPx, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 87, 34, 0.65)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 6]);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 87, 34, 0.04)';
+        ctx.fill();
+        ctx.setLineDash([]);
+      }
 
       if (walkedRoute.length > 1) {
         ctx.beginPath();
@@ -282,17 +395,50 @@ const SELF_CONTAINED_MAP_HTML = `
         ctx.stroke();
       }
 
-      // 3. Render Markers
-      let markersHtml = '<div class="user-marker" style="left:' + uPt.x + 'px;top:' + uPt.y + 'px;"><div class="user-pulse"></div><div class="user-dot"></div></div>';
+      // 3. Render Markers (Focus ONLY on User + Selected Place when a destination is active, cap at 35 when browsing)
+      let markersHtml =
+        '<div class="user-marker" style="left:' +
+        Math.round(uPt.x) +
+        'px;top:' +
+        Math.round(uPt.y) +
+        'px;">' +
+        '<div class="user-pulse"></div>' +
+        '<div id="userHeadingRotor" class="user-heading-rotor" style="transform:rotate(' +
+        userHeading +
+        'deg);">' +
+        '<div class="user-beam"></div>' +
+        '<div class="user-arrow"></div>' +
+        '<div class="user-arrow-inner"></div>' +
+        '</div>' +
+        '<div class="user-dot"></div>' +
+        '</div>';
+      if (selectedId) {
+        markersHtml += '<div class="you-label" style="left:' + Math.round(uPt.x) + 'px;top:' + Math.round(uPt.y) + 'px;">📍 You</div>';
+      }
 
-      places.forEach((p) => {
+      const visiblePlaces = selectedId
+        ? places.filter((p) => p.id === selectedId)
+        : places.slice(0, 35);
+
+      for (let i = 0; i < visiblePlaces.length; i++) {
+        const p = visiblePlaces[i];
         const pt = latLngToScreen(p.lat, p.lng);
-        if (pt.x < -50 || pt.x > w + 50 || pt.y < -50 || pt.y > h + 50) return;
+        if (!selectedId && (pt.x < -40 || pt.x > w + 40 || pt.y < -40 || pt.y > h + 40)) continue;
         const isSel = p.id === selectedId;
         const cls = 'poi-pin ' + (p.category || '') + (isSel ? ' selected' : '');
-        markersHtml += '<div class="' + cls + '" style="left:' + pt.x + 'px;top:' + pt.y + 'px;" onclick="selectPlace(\\'' + p.id + '\\')"><span>' + (p.emoji || '🍴') + '</span></div>';
-      });
+        const rx = Math.round(pt.x);
+        const ry = Math.round(pt.y);
+        markersHtml += '<div class="' + cls + '" style="left:' + rx + 'px;top:' + ry + 'px;" onclick="selectPlace(\\'' + p.id + '\\')"><span>' + (p.emoji || '🍴') + '</span></div>';
+        if (isSel && p.name) {
+          const safeName = String(p.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          markersHtml += '<div class="pin-label" style="left:' + rx + 'px;top:' + ry + 'px;">' + (p.emoji || '📍') + ' ' + safeName + '</div>';
+        }
+      }
       markerContainer.innerHTML = markersHtml;
+    }
+
+    function render() {
+      scheduleRender();
     }
 
     function changeZoom(delta) {
@@ -395,6 +541,17 @@ const SELF_CONTAINED_MAP_HTML = `
 
     window.handleCommand = function(msg) {
       if (!msg || !msg.type) return;
+      if (msg.type === 'UPDATE_HEADING') {
+        const target = typeof msg.heading === 'number' ? msg.heading : 0;
+        // Shortest-path angle unwrap so crossing 359° -> 1° never spins backwards 358°
+        const delta = ((((target - userHeading) % 360) + 540) % 360) - 180;
+        userHeading = userHeading + delta;
+        const rotor = document.getElementById('userHeadingRotor');
+        if (rotor) {
+          rotor.style.transform = 'rotate(' + userHeading.toFixed(1) + 'deg)';
+        }
+        return;
+      }
       if (msg.type === 'SYNC_STATE') {
         if (msg.userPos) {
           userLat = msg.userPos.lat;
@@ -434,10 +591,22 @@ const SELF_CONTAINED_MAP_HTML = `
         walkedRoute = [];
         if (remainingRoute.length > 0) {
           followUser = false;
-          const mid = remainingRoute[Math.floor(remainingRoute.length / 2)];
-          centerLat = mid[0];
-          centerLng = mid[1];
-          zoom = 16;
+          let minLat = userLat, maxLat = userLat, minLng = userLng, maxLng = userLng;
+          remainingRoute.forEach((pt) => {
+            if (pt[0] < minLat) minLat = pt[0];
+            if (pt[0] > maxLat) maxLat = pt[0];
+            if (pt[1] < minLng) minLng = pt[1];
+            if (pt[1] > maxLng) maxLng = pt[1];
+          });
+          centerLat = (minLat + maxLat) / 2;
+          centerLng = (minLng + maxLng) / 2;
+
+          // Calculate best zoom so both User and Selected Place fit cleanly in view
+          const latDiff = Math.max(0.0015, (maxLat - minLat) * 1.65);
+          const lngDiff = Math.max(0.0015, (maxLng - minLng) * 1.65);
+          const maxSpan = Math.max(latDiff, lngDiff);
+          let bestZoom = Math.floor(Math.log2(360 / maxSpan));
+          zoom = Math.max(11, Math.min(17, bestZoom));
         }
         render();
       }
@@ -479,22 +648,44 @@ const MapCanvas = forwardRef(
       }
     };
 
-    // Automatically push state whenever props update
+    // Split lightweight user/route updates from heavy places list updates
     useEffect(() => {
       sendCommand({
         type: 'SYNC_STATE',
         userPos,
-        radius: radiusMeters,
-        places,
-        selectedId,
+        radius: radiusMeters
+      });
+    }, [userPos, radiusMeters]);
+
+    useEffect(() => {
+      // Send only compact pin fields over the WebView bridge
+      const slimPlaces = (places || []).slice(0, 45).map((p) => ({
+        id: p.id,
+        name: p.name,
+        lat: p.lat,
+        lng: p.lng,
+        category: p.category,
+        emoji: p.emoji
+      }));
+      sendCommand({
+        type: 'SYNC_STATE',
+        places: slimPlaces,
+        selectedId
+      });
+    }, [places, selectedId]);
+
+    useEffect(() => {
+      sendCommand({
+        type: 'SYNC_STATE',
         remainingRoute: remainingCoords || [],
         walkedRoute: walkedCoords || []
       });
-    }, [userPos, radiusMeters, places, selectedId, remainingCoords, walkedCoords]);
+    }, [remainingCoords, walkedCoords]);
 
     useImperativeHandle(ref, () => ({
       updateUser: (lat, lng, radius) =>
         sendCommand({ type: 'SYNC_STATE', userPos: { lat, lng }, radius }),
+      updateHeading: (deg) => sendCommand({ type: 'UPDATE_HEADING', heading: deg }),
       recenter: (lat, lng) => sendCommand({ type: 'RECENTER', lat, lng }),
       panToArea: (lat, lng, zoom = 15) => sendCommand({ type: 'PAN_TO_AREA', lat, lng, zoom }),
       cycleLayer: () => sendCommand({ type: 'CYCLE_LAYER' }),

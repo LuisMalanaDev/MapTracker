@@ -428,10 +428,10 @@ export async function searchPlacesByQuery(
   return combined.sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
-// Geocode any custom Town, Municipality, Barangay, or Province typed by the user
+// Geocode any custom Town, Municipality, Barangay, City, or Country worldwide
 export async function geocodeAreaLocation(areaName) {
   if (!areaName || !areaName.trim()) return null;
-  const q = `${areaName.trim()}, Philippines`;
+  const q = areaName.trim();
   try {
     const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
       q

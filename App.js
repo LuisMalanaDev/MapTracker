@@ -12,6 +12,7 @@ import {
   TextInput,
   TouchableOpacity,
   FlatList,
+  ScrollView,
   Modal,
   SafeAreaView,
   Platform,
@@ -26,6 +27,7 @@ import { useKeepAwake } from 'expo-keep-awake';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import MapCanvas from './src/components/MapCanvas';
+import BudgetSystemModal from './src/components/BudgetSystemModal';
 import {
   AREA_PRESETS,
   fetchNearbyRestaurants,
@@ -79,6 +81,10 @@ export default function App() {
   const simTimerRef = useRef(null);
   const lastSpokenStepRef = useRef(-1);
   const arrivedTriggeredRef = useRef(false);
+  const lastHeadingTimeRef = useRef(0);
+  const lastHeadingValRef = useRef(0);
+  const lastDistCalcPosRef = useRef({ lat: 0, lng: 0 });
+  const headingNeededRef = useRef(false);
 
   const [userPos, setUserPos] = useState({ lat: 13.9414, lng: 121.6234 });
   const [heading, setHeading] = useState(0);
@@ -90,6 +96,7 @@ export default function App() {
   const [areaList, setAreaList] = useState(AREA_PRESETS);
   const [activeArea, setActiveArea] = useState(AREA_PRESETS[0]); // Default: 'gps' (Near Me)
   const [customAreaModalOpen, setCustomAreaModalOpen] = useState(false);
+  const [cravingModalOpen, setCravingModalOpen] = useState(false);
   const [customAreaInput, setCustomAreaInput] = useState('');
 
   const [allPlaces, setAllPlaces] = useState([]);
@@ -119,7 +126,36 @@ export default function App() {
   const [draftRating, setDraftRating] = useState(5);
   const [draftNote, setDraftNote] = useState('');
 
-  // Load saved favorites & food/hotel diary
+  // Feature #14: Point-Your-Phone Compass Radar Modal + Parked/Hotel Return Pin
+  const [radarModalOpen, setRadarModalOpen] = useState(false);
+  const [savedPinSpot, setSavedPinSpot] = useState(null);
+
+  // Centralized Budgeting System (WealthSync Edition) Connected to Map Tracker
+  const [budgetModalOpen, setBudgetModalOpen] = useState(false);
+  const [budgetTab, setBudgetTab] = useState('overview'); // 'overview' | 'spend' | 'budgets' | 'history'
+  const [accounts, setAccounts] = useState([
+    { id: 'acc_gcash', name: 'GCash', type: 'GCASH', balance: 0 },
+    { id: 'acc_maya', name: 'Maya', type: 'MAYA', balance: 0 },
+    { id: 'acc_cash', name: 'Physical Cash', type: 'CASH', balance: 0 },
+    { id: 'acc_bank', name: 'Bank', type: 'BANK', balance: 0 }
+  ]);
+  const [expectedIncome, setExpectedIncome] = useState(0);
+  const [walletHistory, setWalletHistory] = useState([]);
+  const [budgets, setBudgets] = useState([]);
+  const [vaults, setVaults] = useState([]);
+
+  const walletBalance = useMemo(
+    () => accounts.reduce((sum, a) => sum + Number(a.balance || 0), 0),
+    [accounts]
+  );
+
+  // Draft inputs for Map-Connected Quick Log (Place + Route Transpo)
+  const [expensePlace, setExpensePlace] = useState(null);
+  const [expensePlaceName, setExpensePlaceName] = useState('');
+  const [expenseFoodInput, setExpenseFoodInput] = useState('');
+  const [expenseTranspoInput, setExpenseTranspoInput] = useState('');
+
+  // Load saved favorites, food/hotel diary, parked pin & Centralized Budgeting System state
   useEffect(() => {
     AsyncStorage.getItem('cravenav_favs')
       .then((raw) => {
@@ -132,7 +168,303 @@ export default function App() {
         if (raw) setDiary(JSON.parse(raw));
       })
       .catch(() => {});
+
+    AsyncStorage.getItem('cravenav_saved_pin')
+      .then((raw) => {
+        if (raw) setSavedPinSpot(JSON.parse(raw));
+      })
+      .catch(() => {});
+
+    AsyncStorage.getItem('cravenav_cbs_v3')
+      .then((raw) => {
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed.accounts)) setAccounts(parsed.accounts);
+          if (typeof parsed.expected === 'number') setExpectedIncome(parsed.expected);
+          if (Array.isArray(parsed.history)) setWalletHistory(parsed.history);
+          if (Array.isArray(parsed.budgets)) setBudgets(parsed.budgets);
+          if (Array.isArray(parsed.vaults)) setVaults(parsed.vaults);
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  function persistCBS(
+    nextAccounts = accounts,
+    nextExpected = expectedIncome,
+    nextHistory = walletHistory,
+    nextBudgets = budgets,
+    nextVaults = vaults
+  ) {
+    setAccounts(nextAccounts);
+    setExpectedIncome(nextExpected);
+    setWalletHistory(nextHistory);
+    setBudgets(nextBudgets);
+    setVaults(nextVaults);
+    AsyncStorage.setItem(
+      'cravenav_cbs_v3',
+      JSON.stringify({
+        accounts: nextAccounts,
+        expected: nextExpected,
+        history: nextHistory,
+        budgets: nextBudgets,
+        vaults: nextVaults
+      })
+    ).catch(() => {});
+  }
+
+  // Estimate realistic local Tricycle / Jeep / Ride transpo fare from map distance
+  function estimateTranspoFare(distanceMeters, mode = travelMode) {
+    if (mode === 'foot' && distanceMeters <= 600) return 0;
+    const km = Math.max(0.5, distanceMeters / 1000);
+    // Base ₱20 for first km + ₱10 per additional km
+    return Math.round(20 + Math.max(0, km - 1) * 10);
+  }
+
+  // Estimate calories burned when walking
+  function estimateWalkCalories(distanceMeters) {
+    return Math.max(5, Math.round((distanceMeters / 1000) * 52));
+  }
+
+  // Real-time peak-hour crowd estimator
+  const crowdBadge = useMemo(() => {
+    const hr = new Date().getHours();
+    if ((hr >= 11 && hr <= 13) || (hr >= 18 && hr <= 20)) {
+      return { dot: '🔴', label: 'Peak Hour' };
+    }
+    if ((hr >= 8 && hr <= 10) || (hr >= 14 && hr <= 17)) {
+      return { dot: '🟡', label: 'Moderate' };
+    }
+    return { dot: '🟢', label: 'Quiet Now' };
+  }, []);
+
+  // Open Centralized Budgeting System pre-connected to a Map Restaurant/Hotel & its Route Transpo Cost
+  function openSpendForPlace(place) {
+    if (hapticsEnabled) Vibration.vibrate(50);
+    const target = place || selectedPlace;
+    if (target) {
+      const dist =
+        liveNav && selectedPlace?.id === target.id
+          ? liveNav.remainingMeters
+          : target.distanceMeters || 1000;
+      const autoFare = estimateTranspoFare(dist, 'driving');
+      setExpensePlace(target);
+      setExpensePlaceName(`${target.emoji || '🍽️'} ${target.name}`);
+      setExpenseTranspoInput(String(autoFare));
+    } else {
+      setExpensePlace(null);
+      setExpensePlaceName('');
+      setExpenseTranspoInput('30');
+    }
+    setExpenseFoodInput('');
+    setBudgetTab('spend');
+    setBudgetModalOpen(true);
+  }
+
+  function handleUpdateWalletBalance(accId, newBalVal) {
+    const nextAccs = accounts.map((a) =>
+      a.id === accId ? { ...a, balance: Math.max(0, Number(newBalVal) || 0) } : a
+    );
+    persistCBS(nextAccs, expectedIncome, walletHistory, budgets, vaults);
+    if (hapticsEnabled) Vibration.vibrate(50);
+  }
+
+  function handleRecordMapTripExpense(paymentMethod = 'CASH') {
+    const foodVal = Math.max(0, parseFloat(expenseFoodInput) || 0);
+    const transpoVal = Math.max(0, parseFloat(expenseTranspoInput) || 0);
+    const total = foodVal + transpoVal;
+    if (total <= 0) return;
+
+    const now = new Date();
+    const timeStr = `${now.toLocaleDateString()} • ${now.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit'
+    })}`;
+
+    const isHotel = expensePlace?.category === 'hotel';
+    const primaryCat =
+      foodVal > 0
+        ? isHotel
+          ? 'Hotels & Staycation'
+          : 'Food & Dining'
+        : 'Transportation';
+
+    const nextAccs = accounts.map((a) =>
+      a.type === paymentMethod ? { ...a, balance: Number(a.balance || 0) - total } : a
+    );
+
+    const newEntries = [];
+    if (foodVal > 0 && transpoVal > 0) {
+      // Create unified map trip entry with breakdown + accurate category tracking
+      newEntries.push({
+        id: `tx_${Date.now()}`,
+        type: 'EXPENSE',
+        category: primaryCat,
+        paymentMethod,
+        description: expensePlaceName.trim() || 'Map Meal & Transpo Trip',
+        emoji: expensePlace?.emoji || '🍔',
+        foodCost: foodVal,
+        transpoCost: transpoVal,
+        amount: total,
+        dateText: timeStr,
+        areaLabel: activeArea?.label || 'Map Spot'
+      });
+    } else {
+      newEntries.push({
+        id: `tx_${Date.now()}`,
+        type: 'EXPENSE',
+        category: primaryCat,
+        paymentMethod,
+        description: expensePlaceName.trim() || primaryCat,
+        emoji: expensePlace?.emoji || (transpoVal > 0 ? '🛵' : '🍔'),
+        foodCost: foodVal,
+        transpoCost: transpoVal,
+        amount: total,
+        dateText: timeStr,
+        areaLabel: activeArea?.label || 'Map Spot'
+      });
+    }
+
+    const nextHist = [...newEntries, ...walletHistory];
+    persistCBS(nextAccs, expectedIncome, nextHist, budgets, vaults);
+    setExpenseFoodInput('');
+    setBudgetTab('overview');
+    if (hapticsEnabled) Vibration.vibrate(70);
+  }
+
+  function handleRecordGeneralTransaction({ type, amount, category, paymentMethod, description }) {
+    const val = Number(amount) || 0;
+    if (val <= 0) return;
+    const now = new Date();
+    const timeStr = `${now.toLocaleDateString()} • ${now.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit'
+    })}`;
+
+    const nextAccs = accounts.map((a) => {
+      if (a.type !== paymentMethod) return a;
+      return {
+        ...a,
+        balance: type === 'INCOME' ? Number(a.balance || 0) + val : Number(a.balance || 0) - val
+      };
+    });
+
+    const entry = {
+      id: `tx_${Date.now()}`,
+      type,
+      category,
+      paymentMethod,
+      description: description || category,
+      emoji: type === 'INCOME' ? '💵' : category === 'Transportation' ? '🛵' : '💸',
+      foodCost: 0,
+      transpoCost: 0,
+      amount: val,
+      dateText: timeStr
+    };
+
+    persistCBS(nextAccs, expectedIncome, [entry, ...walletHistory], budgets, vaults);
+    if (hapticsEnabled) Vibration.vibrate(70);
+  }
+
+  function handleClaimExpectedSalary() {
+    if (expectedIncome <= 0) return;
+    handleRecordGeneralTransaction({
+      type: 'INCOME',
+      amount: expectedIncome,
+      category: 'Salary / Wages',
+      paymentMethod: 'CASH',
+      description: 'Received Future Salary / Earnings'
+    });
+  }
+
+  function handleUndoTransaction(tx) {
+    const nextHist = walletHistory.filter((item) => item.id !== tx.id);
+    const amt = Number(tx.amount || tx.totalAmount || 0);
+    const method = tx.paymentMethod || 'CASH';
+    const nextAccs = accounts.map((a) => {
+      if (a.type !== method) return a;
+      const isExp = tx.type === 'EXPENSE' || tx.type === 'expense';
+      return {
+        ...a,
+        balance: isExp ? Number(a.balance || 0) + amt : Number(a.balance || 0) - amt
+      };
+    });
+    persistCBS(nextAccs, expectedIncome, nextHist, budgets, vaults);
+    if (hapticsEnabled) Vibration.vibrate(50);
+  }
+
+  function handleSaveBudgetCap(category, limit) {
+    const existing = budgets.find((b) => b.category === category);
+    const nextBudgets = existing
+      ? budgets.map((b) => (b.category === category ? { ...b, limit } : b))
+      : [...budgets, { id: `b_${Date.now()}`, category, limit }];
+    persistCBS(accounts, expectedIncome, walletHistory, nextBudgets, vaults);
+    if (hapticsEnabled) Vibration.vibrate(50);
+  }
+
+  function handleDeleteBudgetCap(id) {
+    const nextBudgets = budgets.filter((b) => b.id !== id);
+    persistCBS(accounts, expectedIncome, walletHistory, nextBudgets, vaults);
+  }
+
+  function handleCreateVault(name, targetAmount, currentAmount = 0) {
+    const nextVaults = [
+      ...vaults,
+      { id: `v_${Date.now()}`, name, targetAmount, currentAmount }
+    ];
+    persistCBS(accounts, expectedIncome, walletHistory, budgets, nextVaults);
+    if (hapticsEnabled) Vibration.vibrate(60);
+  }
+
+  function handleVaultAction(vaultId, actionType, amount) {
+    const nextVaults = vaults.map((v) => {
+      if (v.id !== vaultId) return v;
+      const nextAmt =
+        actionType === 'DEPOSIT'
+          ? Number(v.currentAmount || 0) + amount
+          : Math.max(0, Number(v.currentAmount || 0) - amount);
+      return { ...v, currentAmount: nextAmt };
+    });
+    persistCBS(accounts, expectedIncome, walletHistory, budgets, nextVaults);
+    if (hapticsEnabled) Vibration.vibrate(60);
+  }
+
+  function handleDeleteVault(vaultId) {
+    const nextVaults = vaults.filter((v) => v.id !== vaultId);
+    persistCBS(accounts, expectedIncome, walletHistory, budgets, nextVaults);
+  }
+
+  // Save or Return to Parked Bike/Car or Hotel Room
+  function handlePinCurrentSpot() {
+    const spot = {
+      id: 'saved_return_pin',
+      name: 'My Parked Spot / Hotel Room',
+      lat: userPos.lat,
+      lng: userPos.lng,
+      category: 'hotel',
+      emoji: '📌',
+      typeLabel: 'Saved Return Point',
+      address: `${userPos.lat.toFixed(5)}, ${userPos.lng.toFixed(5)}`,
+      distanceMeters: 0,
+      distanceText: '0 m',
+      walkMinutes: 1
+    };
+    setSavedPinSpot(spot);
+    AsyncStorage.setItem('cravenav_saved_pin', JSON.stringify(spot)).catch(() => {});
+    if (hapticsEnabled) Vibration.vibrate(70);
+  }
+
+  const walletTotals = useMemo(() => {
+    let foodTotal = 0;
+    let transpoTotal = 0;
+    walletHistory.forEach((tx) => {
+      if (tx.type === 'expense') {
+        foodTotal += tx.foodCost || 0;
+        transpoTotal += tx.transpoCost || 0;
+      }
+    });
+    return { foodTotal, transpoTotal, totalSpent: foodTotal + transpoTotal };
+  }, [walletHistory]);
 
   // Effective scan center (either Live GPS or the selected Municipality/Town/Barangay)
   const scanCenter = useMemo(() => {
@@ -171,8 +503,8 @@ export default function App() {
         gpsSub = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.Balanced,
-            timeInterval: 1000,
-            distanceInterval: 1
+            timeInterval: 3000,
+            distanceInterval: 5
           },
           (loc) => {
             if (simTimerRef.current) return;
@@ -190,8 +522,27 @@ export default function App() {
         );
 
         headingSub = await Location.watchHeadingAsync((h) => {
-          const deg = h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
-          if (typeof deg === 'number') setHeading(Math.round(deg));
+          const now = Date.now();
+          if (now - lastHeadingTimeRef.current < 180) return;
+          // Prefer GPS-calibrated True North heading; fallback to Magnetic North
+          const rawDeg = h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
+          if (typeof rawDeg === 'number' && !isNaN(rawDeg)) {
+            // Circular shortest-angle smoothing to filter out hand tremor / magnetic noise
+            const prev = lastHeadingValRef.current;
+            const diff = ((((rawDeg - prev) % 360) + 540) % 360) - 180;
+            if (Math.abs(diff) >= 2.5) {
+              const smoothed = (prev + diff * 0.45 + 360) % 360;
+              const rounded = Math.round(smoothed);
+              lastHeadingTimeRef.current = now;
+              lastHeadingValRef.current = smoothed;
+              // Directly rotate the blue circle arrow & cone in the map WebView (zero React re-render lag!)
+              mapRef.current?.updateHeading(rounded);
+              // Only trigger React state re-render when Radar Modal or Active Navigation HUD is open
+              if (headingNeededRef.current) {
+                setHeading(rounded);
+              }
+            }
+          }
         });
 
         setTimeout(() => {
@@ -228,12 +579,22 @@ export default function App() {
     };
   }, [userPos, heading, selectedPlace]);
 
+  // Keep headingNeededRef synced so compass hardware never causes idle re-renders
+  useEffect(() => {
+    headingNeededRef.current = Boolean(radarModalOpen || selectedPlace);
+  }, [radarModalOpen, selectedPlace]);
+
   // Sync user position with Map & Live Navigation Progress
   useEffect(() => {
     if (!mapReady) return;
-    mapRef.current?.updateUser(userPos.lat, userPos.lng, radiusMeters);
 
-    if (allPlaces.length > 0) {
+    // Only recalculate allPlaces distances if user moved at least ~15 meters
+    const movedDist = Math.hypot(
+      userPos.lat - lastDistCalcPosRef.current.lat,
+      userPos.lng - lastDistCalcPosRef.current.lng
+    );
+    if (allPlaces.length > 0 && movedDist > 0.00014) {
+      lastDistCalcPosRef.current = { lat: userPos.lat, lng: userPos.lng };
       setAllPlaces((prev) => recalculateDistances(prev, userPos.lat, userPos.lng));
     }
 
@@ -374,10 +735,30 @@ export default function App() {
     });
   }, [allPlaces, activeCategory, searchQuery, favorites, diary]);
 
-  useEffect(() => {
-    if (!mapReady) return;
-    mapRef.current?.renderPOIs(filteredPlaces, selectedPlace ? selectedPlace.id : null);
-  }, [filteredPlaces, selectedPlace, mapReady]);
+  // Feature #14: Compute restaurants & hotels directly in front of where phone is pointing (only when Radar modal is open)
+  const radarPlaces = useMemo(() => {
+    if (!radarModalOpen) return [];
+    const pool = filteredPlaces.length > 0 ? filteredPlaces : allPlaces;
+    return pool
+      .map((p) => {
+        const bearing = calculateBearing(userPos.lat, userPos.lng, p.lat, p.lng);
+        const relDeg = (bearing - heading + 360) % 360;
+        const signedAngle = relDeg > 180 ? relDeg - 360 : relDeg; // -180 to +180
+        const absAngle = Math.abs(signedAngle);
+        let sector = 'behind';
+        if (absAngle <= 30) sector = 'ahead';
+        else if (signedAngle > 30 && signedAngle <= 100) sector = 'right';
+        else if (signedAngle < -30 && signedAngle >= -100) sector = 'left';
+        return {
+          ...p,
+          bearing: Math.round(bearing),
+          signedAngle: Math.round(signedAngle),
+          absAngle: Math.round(absAngle),
+          sector
+        };
+      })
+      .sort((a, b) => a.absAngle - b.absAngle);
+  }, [radarModalOpen, filteredPlaces, allPlaces, userPos, heading]);
 
   async function handleCravingPress(craving) {
     if (activeCraving === craving.id) {
@@ -557,7 +938,7 @@ export default function App() {
           ref={mapRef}
           userPos={userPos}
           radiusMeters={radiusMeters}
-          places={filteredPlaces}
+          places={selectedPlace ? [selectedPlace] : filteredPlaces}
           selectedId={selectedPlace ? selectedPlace.id : null}
           remainingCoords={liveNav ? liveNav.remainingCoords : activeRoute ? activeRoute.coords : []}
           walkedCoords={liveNav ? liveNav.walkedCoords : []}
@@ -570,7 +951,115 @@ export default function App() {
         />
       </View>
 
-      {/* Top Navigation HUD */}
+      {/* Sleek Floating Top Search & Location Bar (Visible when NOT actively navigating) */}
+      {!selectedPlace && (
+        <View style={styles.topFloatingHeader}>
+          {/* Top Row: Area Picker Pill + Live Wallet Balance Pill + Weather & Map Actions */}
+          <View style={styles.topBarRow}>
+            <TouchableOpacity
+              style={styles.locationSelectorPill}
+              onPress={() => setCustomAreaModalOpen(true)}
+            >
+              <View style={styles.gpsDot} />
+              <Text style={styles.locationSelectorText} numberOfLines={1}>
+                {activeArea.label}
+              </Text>
+              <Text style={styles.locationChevron}>▾</Text>
+            </TouchableOpacity>
+
+            <View style={styles.topRightActions}>
+              {/* Live Map-Connected Wallet Pill */}
+              <TouchableOpacity
+                style={[
+                  styles.walletTopPill,
+                  walletBalance < 300 && styles.walletTopPillLow
+                ]}
+                onPress={() => {
+                  setBudgetTab('overview');
+                  setBudgetModalOpen(true);
+                }}
+              >
+                <Text style={styles.walletTopPillText}>
+                  💳 ₱{walletBalance.toLocaleString()}
+                </Text>
+              </TouchableOpacity>
+
+              <View style={styles.weatherPill}>
+                <Text style={styles.weatherPillText}>
+                  {weather.icon} {weather.temp}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.topIconBtn}
+                onPress={() => {
+                  setActiveArea(areaList[0]);
+                  mapRef.current?.recenter(userPos.lat, userPos.lng);
+                }}
+              >
+                <Text style={{ fontSize: 14 }}>🎯</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.topIconBtn}
+                onPress={() => mapRef.current?.cycleLayer()}
+              >
+                <Text style={{ fontSize: 14 }}>🗺️</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Second Row: Clean Modern Search Bar + Cravings (⚡) + Point-Your-Phone Radar (🧭) + Roulette (🎲) */}
+          <View style={styles.floatingSearchRow}>
+            <View style={styles.modernSearchBox}>
+              <Text style={{ fontSize: 14, marginRight: 8, opacity: 0.7 }}>🔍</Text>
+              <TextInput
+                style={styles.modernSearchInput}
+                placeholder="Search Jollibee, hotels, cafés, lomi..."
+                placeholderTextColor="#64748b"
+                value={searchQuery}
+                onChangeText={(txt) => {
+                  setSearchQuery(txt);
+                  if (!txt) setActiveCraving(null);
+                }}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity
+                  onPress={() => {
+                    setSearchQuery('');
+                    setActiveCraving(null);
+                  }}
+                  style={styles.clearSearchBtn}
+                >
+                  <Text style={{ color: '#94a3b8', fontSize: 12, fontWeight: '700' }}>✕</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.modernActionBtn,
+                activeCraving && styles.modernActionBtnActive
+              ]}
+              onPress={() => setCravingModalOpen(true)}
+            >
+              <Text style={{ fontSize: 16 }}>⚡</Text>
+            </TouchableOpacity>
+
+            {/* Feature #14: Point-Your-Phone Live Compass Radar */}
+            <TouchableOpacity
+              style={styles.modernRadarBtn}
+              onPress={() => setRadarModalOpen(true)}
+            >
+              <Text style={{ fontSize: 16 }}>🧭</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.modernRouletteBtn} onPress={spinRandomRestaurant}>
+              <Text style={{ fontSize: 16 }}>🎲</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Top Navigation HUD (Visible ONLY when a destination is selected) */}
       {selectedPlace && liveNav && (
         <View style={styles.navHud}>
           <View style={styles.turnBanner}>
@@ -584,14 +1073,29 @@ export default function App() {
                 {liveNav.currentStep ? liveNav.currentStep.instruction : `Head to ${selectedPlace.name}`}
               </Text>
               <Text style={styles.turnSub} numberOfLines={1}>
-                Destination: {selectedPlace.name}
+                {selectedPlace.emoji} {selectedPlace.name} •{' '}
+                {travelMode === 'driving'
+                  ? `🛵 ~₱${estimateTranspoFare(liveNav.remainingMeters, 'driving')} fare`
+                  : `🔥 ~${estimateWalkCalories(liveNav.remainingMeters)} kcal`}
               </Text>
             </View>
+            <TouchableOpacity
+              style={styles.spendHudBtn}
+              onPress={() => openSpendForPlace(selectedPlace)}
+            >
+              <Text style={{ fontSize: 12, color: '#34d399', fontWeight: '800' }}>💸₱</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={styles.shareHudBtn}
               onPress={() => sharePlaceAndETA(selectedPlace)}
             >
-              <Text style={{ fontSize: 16 }}>📤</Text>
+              <Text style={{ fontSize: 15 }}>📤</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.closeHudBtn}
+              onPress={stopNavigation}
+            >
+              <Text style={{ color: '#fca5a5', fontSize: 14, fontWeight: '800' }}>✕</Text>
             </TouchableOpacity>
           </View>
 
@@ -599,8 +1103,8 @@ export default function App() {
             <View style={styles.compassBanner}>
               <Text style={styles.compassArrow}>{compassInfo.arrow}</Text>
               <Text style={styles.compassText}>
-                Compass: <Text style={{ color: '#fff', fontWeight: '800' }}>{compassInfo.label}</Text>{' '}
-                ({compassInfo.targetBearing}° • Facing {heading}°)
+                <Text style={{ color: '#fff', fontWeight: '800' }}>{compassInfo.label}</Text>{' '}
+                • {compassInfo.targetBearing}° (Facing {heading}°)
               </Text>
             </View>
           )}
@@ -608,15 +1112,17 @@ export default function App() {
           <View style={styles.statsGrid}>
             <View style={styles.statCell}>
               <Text style={styles.statVal}>{liveNav.remainingText}</Text>
-              <Text style={styles.statLbl}>REMAINING</Text>
+              <Text style={styles.statLbl}>DISTANCE</Text>
             </View>
+            <View style={styles.statDivider} />
             <View style={styles.statCell}>
               <Text style={styles.statVal}>{liveNav.remainingMins} min</Text>
               <Text style={styles.statLbl}>EST. TIME</Text>
             </View>
+            <View style={styles.statDivider} />
             <View style={styles.statCell}>
-              <Text style={styles.statVal}>{liveNav.progressPercent}%</Text>
-              <Text style={styles.statLbl}>CLOSER</Text>
+              <Text style={[styles.statVal, { color: '#34d399' }]}>{liveNav.progressPercent}%</Text>
+              <Text style={styles.statLbl}>PROGRESS</Text>
             </View>
           </View>
 
@@ -635,14 +1141,14 @@ export default function App() {
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.navBtn}
+              style={[styles.navBtn, showStepsList && styles.navBtnActive]}
               onPress={() => setShowStepsList(!showStepsList)}
             >
               <Text style={styles.navBtnText}>📋 Steps</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.navBtn}
+              style={[styles.navBtn, voiceEnabled && styles.navBtnActive]}
               onPress={() => setVoiceEnabled(!voiceEnabled)}
             >
               <Text style={styles.navBtnText}>{voiceEnabled ? '🔊 Voice' : '🔇 Mute'}</Text>
@@ -650,13 +1156,9 @@ export default function App() {
 
             <TouchableOpacity
               style={styles.navBtn}
-              onPress={() => setHapticsEnabled(!hapticsEnabled)}
+              onPress={() => openSpendForPlace(selectedPlace)}
             >
-              <Text style={styles.navBtnText}>{hapticsEnabled ? '📳 Buzz' : '📴 Off'}</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={[styles.navBtn, styles.stopBtn]} onPress={stopNavigation}>
-              <Text style={[styles.navBtnText, { color: '#fca5a5' }]}>✕ End</Text>
+              <Text style={[styles.navBtnText, { color: '#34d399' }]}>💳 Spend</Text>
             </TouchableOpacity>
           </View>
 
@@ -678,38 +1180,7 @@ export default function App() {
         </View>
       )}
 
-      {/* Right Floating Map Controls */}
-      <View style={styles.fabCol}>
-        <TouchableOpacity
-          style={styles.fabBtn}
-          onPress={() => {
-            setActiveArea(areaList[0]);
-            mapRef.current?.recenter(userPos.lat, userPos.lng);
-          }}
-        >
-          <Text style={styles.fabText}>🎯</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.fabBtn}
-          onPress={() =>
-            loadNearby(
-              scanCenter.lat,
-              scanCenter.lng,
-              radiusMeters,
-              userPos.lat,
-              userPos.lng,
-              scanCenter.label
-            )
-          }
-        >
-          <Text style={styles.fabText}>🔄</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.fabBtn} onPress={() => mapRef.current?.cycleLayer()}>
-          <Text style={styles.fabText}>🗺️</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Bottom Restaurant & Hotel Explorer Sheet */}
+      {/* Clean Modern Bottom Sheet */}
       <View style={[styles.bottomSheet, sheetMinimized && styles.bottomSheetMinimized]}>
         <TouchableOpacity
           style={styles.sheetHandleWrap}
@@ -718,83 +1189,81 @@ export default function App() {
           <View style={styles.sheetHandle} />
         </TouchableOpacity>
 
-        {/* Brand Header + Live Weather Badge */}
-        <View style={styles.headerRow}>
-          <View style={styles.brandGroup}>
-            <View style={styles.brandIcon}>
-              <Text style={{ fontSize: 19 }}>🍜</Text>
-            </View>
-            <View>
-              <Text style={styles.brandTitle}>CraveNav • Food & Hotels</Text>
-              <Text style={styles.brandSub}>
-                {weather.icon} {weather.temp} • {weather.advice}
+        {/* Minimized Bar (When navigating or minimized) */}
+        {sheetMinimized ? (
+          <View style={styles.minimizedBar}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.minimizedTitle} numberOfLines={1}>
+                {selectedPlace
+                  ? `${selectedPlace.emoji} Focused on ${selectedPlace.name}`
+                  : `${filteredPlaces.length} Places • Wallet: ₱${walletBalance.toLocaleString()}`}
+              </Text>
+              <Text style={styles.minimizedSub}>
+                {selectedPlace
+                  ? `Wallet: ₱${walletBalance.toLocaleString()} • Tap 💸₱ to log food & transpo`
+                  : 'Tap handle to browse restaurants & hotels'}
               </Text>
             </View>
-          </View>
-          <View style={styles.gpsBadge}>
-            <View style={styles.gpsDot} />
-            <Text style={styles.gpsBadgeText}>{gpsStatus}</Text>
-          </View>
-        </View>
-
-        {!sheetMinimized && (
-          <>
-            {/* Search + Roulette */}
-            <View style={styles.searchRow}>
-              <View style={styles.searchBox}>
-                <Text style={{ marginRight: 6 }}>🔍</Text>
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Search restaurants, hotels, resorts, cafés..."
-                  placeholderTextColor="#64748b"
-                  value={searchQuery}
-                  onChangeText={(txt) => {
-                    setSearchQuery(txt);
-                    if (!txt) setActiveCraving(null);
-                  }}
-                />
-                {searchQuery.length > 0 && (
-                  <TouchableOpacity
-                    onPress={() => {
-                      setSearchQuery('');
-                      setActiveCraving(null);
-                    }}
-                  >
-                    <Text style={{ color: '#94a3b8', paddingHorizontal: 4 }}>✕</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-              <TouchableOpacity style={styles.rouletteBtn} onPress={spinRandomRestaurant}>
-                <Text style={{ fontSize: 18 }}>🎲</Text>
+            {selectedPlace ? (
+              <TouchableOpacity style={styles.minimizedStopBtn} onPress={stopNavigation}>
+                <Text style={styles.minimizedStopText}>Show All Pins</Text>
               </TouchableOpacity>
-            </View>
-
-            {/* NEW: Municipality / Town / Barangay / City Filter Bar */}
-            <View style={{ height: 34, marginBottom: 4 }}>
+            ) : (
+              <TouchableOpacity
+                style={styles.minimizedExpandBtn}
+                onPress={() => setSheetMinimized(false)}
+              >
+                <Text style={styles.minimizedExpandText}>Expand ▲</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        ) : (
+          <>
+            {/* ONLY ONE Clean Category Tab Bar + Budget & Radar Quick Pills */}
+            <View style={styles.categoryBarWrap}>
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                data={[...areaList, { id: 'add_custom', label: '➕ Any Town / Brgy...' }]}
+                data={[
+                  { id: 'wallet_btn', label: `💳 Budget (₱${walletBalance.toLocaleString()})` },
+                  { id: 'radar_btn', label: `🧭 Point Radar (${heading}°)` },
+                  ...CATEGORIES
+                ]}
                 keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.chipsList}
+                contentContainerStyle={styles.cleanChipsList}
                 renderItem={({ item }) => {
-                  if (item.id === 'add_custom') {
+                  if (item.id === 'wallet_btn') {
                     return (
                       <TouchableOpacity
-                        style={styles.addAreaChip}
-                        onPress={() => setCustomAreaModalOpen(true)}
+                        style={styles.walletCategoryChip}
+                        onPress={() => {
+                          setBudgetTab('overview');
+                          setBudgetModalOpen(true);
+                        }}
                       >
-                        <Text style={styles.addAreaText}>{item.label}</Text>
+                        <Text style={styles.walletCategoryChipText}>{item.label}</Text>
                       </TouchableOpacity>
                     );
                   }
-                  const isAct = activeArea && activeArea.id === item.id;
+                  if (item.id === 'radar_btn') {
+                    return (
+                      <TouchableOpacity
+                        style={styles.radarCategoryChip}
+                        onPress={() => setRadarModalOpen(true)}
+                      >
+                        <Text style={styles.radarCategoryChipText}>{item.label}</Text>
+                      </TouchableOpacity>
+                    );
+                  }
+                  const isActive = activeCategory === item.id;
                   return (
                     <TouchableOpacity
-                      style={[styles.areaChip, isAct && styles.areaChipActive]}
-                      onPress={() => handleSelectArea(item)}
+                      style={[styles.cleanChip, isActive && styles.cleanChipActive]}
+                      onPress={() => setActiveCategory(item.id)}
                     >
-                      <Text style={[styles.areaChipText, isAct && styles.areaChipTextActive]}>
+                      <Text
+                        style={[styles.cleanChipText, isActive && styles.cleanChipTextActive]}
+                      >
                         {item.label}
                       </Text>
                     </TouchableOpacity>
@@ -803,69 +1272,32 @@ export default function App() {
               />
             </View>
 
-            {/* 1-Tap Craving & Hotel Quick Pills */}
-            <View style={{ height: 32, marginBottom: 4 }}>
-              <FlatList
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                data={CRAVINGS}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.chipsList}
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={[
-                      styles.cravingChip,
-                      activeCraving === item.id && styles.cravingChipActive
-                    ]}
-                    onPress={() => handleCravingPress(item)}
-                  >
-                    <Text
-                      style={[
-                        styles.cravingText,
-                        activeCraving === item.id && styles.cravingTextActive
-                      ]}
-                    >
-                      {item.label}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              />
-            </View>
-
-            {/* Category Chips (All Spots, Hotels & Stays, Restaurants, Fast Food, Cafés, Saved, Tried) */}
-            <View style={{ height: 36 }}>
-              <FlatList
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                data={CATEGORIES}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.chipsList}
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={[styles.chip, activeCategory === item.id && styles.chipActive]}
-                    onPress={() => setActiveCategory(item.id)}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        activeCategory === item.id && styles.chipTextActive
-                      ]}
-                    >
-                      {item.label}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              />
-            </View>
-
-            {/* Sub-toolbar: Count, Radius, Walk/Ride */}
+            {/* Compact Sub-Header: Spot Count + Radius + Parked Pin + Walk/Ride Switch */}
             <View style={styles.subToolbar}>
-              <TouchableOpacity onPress={cycleRadius} style={styles.radiusPill}>
-                <Text style={styles.subToolbarText}>
-                  {filteredPlaces.length} spots in {activeArea.label.replace(/^[^\w]+/, '')} •{' '}
-                  {(radiusMeters / 1000).toFixed(1)} km ▾
-                </Text>
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                <Text style={styles.spotCountText}>{filteredPlaces.length} spots</Text>
+                <TouchableOpacity onPress={cycleRadius} style={styles.radiusPill}>
+                  <Text style={styles.radiusPillText}>
+                    {(radiusMeters / 1000).toFixed(1)} km ▾
+                  </Text>
+                </TouchableOpacity>
+                {savedPinSpot ? (
+                  <TouchableOpacity
+                    onPress={() => startNavigation(savedPinSpot)}
+                    onLongPress={() => {
+                      setSavedPinSpot(null);
+                      AsyncStorage.removeItem('cravenav_saved_pin').catch(() => {});
+                    }}
+                    style={styles.savedPinChip}
+                  >
+                    <Text style={styles.savedPinChipText}>📌 Return</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity onPress={handlePinCurrentSpot} style={styles.pinHereChip}>
+                    <Text style={styles.pinHereChipText}>📌 Pin Spot</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
 
               <View style={styles.modeGroup}>
                 <TouchableOpacity
@@ -875,7 +1307,14 @@ export default function App() {
                     if (selectedPlace) startNavigation(selectedPlace, 'foot');
                   }}
                 >
-                  <Text style={styles.modeBtnText}>🚶 Walk</Text>
+                  <Text
+                    style={[
+                      styles.modeBtnText,
+                      travelMode === 'foot' && styles.modeBtnTextActive
+                    ]}
+                  >
+                    🚶 Walk
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.modeBtn, travelMode === 'driving' && styles.modeBtnActive]}
@@ -884,77 +1323,125 @@ export default function App() {
                     if (selectedPlace) startNavigation(selectedPlace, 'driving');
                   }}
                 >
-                  <Text style={styles.modeBtnText}>🛵 Ride</Text>
+                  <Text
+                    style={[
+                      styles.modeBtnText,
+                      travelMode === 'driving' && styles.modeBtnTextActive
+                    ]}
+                  >
+                    🛵 Ride
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
 
-            {/* Places List */}
+            {/* Clean Modern Places List */}
             {loadingPlaces ? (
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyText}>
-                  🔍 Scanning restaurants & hotels in {activeArea.label}...
+                  Scanning places in {activeArea.label}...
                 </Text>
               </View>
             ) : (
               <FlatList
                 data={filteredPlaces}
                 keyExtractor={(item) => item.id}
-                contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: 20 }}
+                initialNumToRender={8}
+                maxToRenderPerBatch={6}
+                windowSize={5}
+                removeClippedSubviews={Platform.OS === 'android'}
+                contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}
+                showsVerticalScrollIndicator={false}
                 renderItem={({ item }) => {
                   const isSel = selectedPlace && selectedPlace.id === item.id;
                   const isFav = favorites.includes(item.id);
                   const diaryEntry = diary[item.id];
+                  const estFare = estimateTranspoFare(item.distanceMeters, 'driving');
+                  const estKcal = estimateWalkCalories(item.distanceMeters);
+                  const etaText =
+                    item.distanceMeters > 3500 || travelMode === 'driving'
+                      ? `🛵 ${Math.max(1, Math.round(item.distanceMeters / 450))}m • ~₱${estFare}`
+                      : `🚶 ${item.walkMinutes}m • 🔥${estKcal} cal`;
+
                   return (
                     <TouchableOpacity
                       style={[styles.placeCard, isSel && styles.placeCardSelected]}
+                      activeOpacity={0.85}
                       onPress={() => startNavigation(item)}
                     >
-                      <View style={styles.cardTop}>
-                        <View style={styles.cardEmojiBox}>
-                          <Text style={{ fontSize: 20 }}>{item.emoji}</Text>
+                      <View style={styles.cardMainRow}>
+                        <View
+                          style={[
+                            styles.cardEmojiBox,
+                            item.category === 'hotel' && styles.cardEmojiHotel,
+                            item.category === 'cafe' && styles.cardEmojiCafe
+                          ]}
+                        >
+                          <Text style={{ fontSize: 22 }}>{item.emoji}</Text>
                         </View>
-                        <View style={{ flex: 1, marginHorizontal: 10 }}>
+
+                        <View style={{ flex: 1, marginHorizontal: 12 }}>
                           <Text style={styles.placeName} numberOfLines={1}>
                             {item.name}
                           </Text>
                           <Text style={styles.placeMeta} numberOfLines={1}>
-                            {item.typeLabel} • {item.address}
+                            {item.typeLabel} • {crowdBadge.dot} {crowdBadge.label}
                           </Text>
-                          {diaryEntry && (
+                          {diaryEntry ? (
                             <Text style={styles.diaryBadge} numberOfLines={1}>
-                              ✅ Tried: {'⭐'.repeat(diaryEntry.rating)}{' '}
-                              {diaryEntry.note ? `— "${diaryEntry.note}"` : ''}
+                              {'⭐'.repeat(diaryEntry.rating)}{' '}
+                              {diaryEntry.note ? `"${diaryEntry.note}"` : 'Tried'}
+                            </Text>
+                          ) : (
+                            <Text style={styles.placeAddressSub} numberOfLines={1}>
+                              📍 {item.address} • Transpo ~₱{estFare}
                             </Text>
                           )}
                         </View>
-                        <View style={styles.distPill}>
-                          <Text style={styles.distPillText}>{item.distanceText}</Text>
+
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={styles.distValueText}>{item.distanceText}</Text>
+                          <Text style={styles.etaSubText}>{etaText}</Text>
                         </View>
                       </View>
 
-                      <View style={styles.cardBottom}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                          <Text style={styles.etaLabel}>
-                            {item.distanceMeters > 3500
-                              ? `🛵 ~${Math.max(1, Math.round(item.distanceMeters / 450))}m ride`
-                              : `🚶 ~${item.walkMinutes}m walk`}
-                          </Text>
-                          <TouchableOpacity onPress={() => toggleFavorite(item.id)}>
-                            <Text style={{ fontSize: 15 }}>{isFav ? '❤️' : '🤍'}</Text>
+                      <View style={styles.cardFooterRow}>
+                        <View style={styles.cardIconActions}>
+                          <TouchableOpacity
+                            style={styles.cardActionPill}
+                            onPress={() => toggleFavorite(item.id)}
+                          >
+                            <Text style={{ fontSize: 12.5 }}>{isFav ? '❤️' : '🤍'}</Text>
                           </TouchableOpacity>
-                          <TouchableOpacity onPress={() => openDiaryModal(item)}>
-                            <Text style={{ fontSize: 13, color: '#fbbf24', fontWeight: '700' }}>
-                              {diaryEntry ? '📝 Edit Note' : '⭐ Rate'}
+
+                          <TouchableOpacity
+                            style={styles.cardActionPill}
+                            onPress={() => openDiaryModal(item)}
+                          >
+                            <Text style={styles.cardActionPillText}>
+                              {diaryEntry ? '📝 Note' : '⭐ Rate'}
                             </Text>
                           </TouchableOpacity>
-                          <TouchableOpacity onPress={() => sharePlaceAndETA(item)}>
-                            <Text style={{ fontSize: 14 }}>📤</Text>
+
+                          {/* Connected to Map Budget Tracker! */}
+                          <TouchableOpacity
+                            style={styles.cardSpendPill}
+                            onPress={() => openSpendForPlace(item)}
+                          >
+                            <Text style={styles.cardSpendPillText}>💸 Spend</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={styles.cardActionPill}
+                            onPress={() => sharePlaceAndETA(item)}
+                          >
+                            <Text style={styles.cardActionPillText}>📤</Text>
                           </TouchableOpacity>
                         </View>
-                        <View style={styles.goBtn}>
+
+                        <View style={[styles.goBtn, isSel && styles.goBtnActive]}>
                           <Text style={styles.goBtnText}>
-                            {isSel ? '🧭 Navigating' : '🚶 Show Path'}
+                            {isSel ? 'Focused ✓' : 'Focus & Go ➔'}
                           </Text>
                         </View>
                       </View>
@@ -967,35 +1454,263 @@ export default function App() {
         )}
       </View>
 
-      {/* Custom Town / Municipality / Barangay Modal */}
-      <Modal visible={customAreaModalOpen} transparent animationType="fade">
+      {/* ===================================================================== */}
+      {/* CENTRALIZED BUDGETING SYSTEM (WEALTHSYNC) CONNECTED TO MAP TRACKER    */}
+      {/* ===================================================================== */}
+      <BudgetSystemModal
+        visible={budgetModalOpen}
+        onClose={() => setBudgetModalOpen(false)}
+        activeTab={budgetTab}
+        setActiveTab={setBudgetTab}
+        accounts={accounts}
+        transactions={walletHistory}
+        budgets={budgets}
+        vaults={vaults}
+        futureSalary={expectedIncome}
+        onUpdateFutureSalary={(val) =>
+          persistCBS(accounts, val, walletHistory, budgets, vaults)
+        }
+        onReceiveFutureSalary={handleClaimExpectedSalary}
+        onUpdateWalletBalance={handleUpdateWalletBalance}
+        onRecordMapTripExpense={handleRecordMapTripExpense}
+        onRecordGeneralTransaction={handleRecordGeneralTransaction}
+        onSaveBudgetCap={handleSaveBudgetCap}
+        onDeleteBudgetCap={handleDeleteBudgetCap}
+        onCreateVault={handleCreateVault}
+        onVaultAction={handleVaultAction}
+        onDeleteVault={handleDeleteVault}
+        onDeleteTransaction={handleUndoTransaction}
+        selectedMapPlace={expensePlace || selectedPlace}
+        nearbyPlaces={filteredPlaces.length > 0 ? filteredPlaces : allPlaces}
+        estimateTranspoFare={(dist) => estimateTranspoFare(dist, 'driving')}
+        prefillPlaceName={expensePlaceName}
+        setPrefillPlaceName={setExpensePlaceName}
+        prefillFoodCost={expenseFoodInput}
+        setPrefillFoodCost={setExpenseFoodInput}
+        prefillTranspoCost={expenseTranspoInput}
+        setPrefillTranspoCost={setExpenseTranspoInput}
+      />
+
+      {/* ===================================================================== */}
+      {/* NEW FEATURE #14: 🧭 POINT-YOUR-PHONE LIVE COMPASS RADAR MODAL         */}
+      {/* ===================================================================== */}
+      <Modal visible={radarModalOpen} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={{ fontSize: 38, marginBottom: 6 }}>🗺️</Text>
-            <Text style={styles.modalTitle}>Jump to Any Town or Barangay</Text>
-            <Text style={styles.modalSub}>
-              Enter any Municipality (Bayan), Barangay, District, or City to scan all its
-              restaurants & hotels:
+          <View style={[styles.modalCard, { maxWidth: 380, maxHeight: '86%' }]}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>🧭 Point-Your-Phone Radar</Text>
+              <TouchableOpacity onPress={() => setRadarModalOpen(false)}>
+                <Text style={{ color: '#94a3b8', fontSize: 18, fontWeight: '700' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubLeft}>
+              Rotate your phone! Scanning spots directly in front of your heading ({heading}°):
             </Text>
 
-            <TextInput
-              style={styles.diaryInput}
-              placeholder="e.g. Ibabang Dupay, Atimonan, Unisan, Calamba..."
-              placeholderTextColor="#64748b"
-              value={customAreaInput}
-              onChangeText={setCustomAreaInput}
-              onSubmitEditing={handleAddCustomArea}
-            />
+            {/* Live Circular Radar Visualizer */}
+            <View style={styles.radarCircle}>
+              <View style={styles.radarRingInner} />
+              <View style={styles.radarCone} />
+              <View style={styles.radarCenterDot} />
+              <Text style={styles.radarHeadingBadge}>⬆️ Facing {heading}°</Text>
+              {radarPlaces.slice(0, 10).map((rp) => {
+                const rad = ((rp.signedAngle - 90) * Math.PI) / 180;
+                const distRatio = Math.min(1, Math.max(0.2, rp.distanceMeters / radiusMeters));
+                const rPx = distRatio * 56;
+                const bx = 70 + Math.cos(rad) * rPx - 10;
+                const by = 70 + Math.sin(rad) * rPx - 10;
+                return (
+                  <View
+                    key={rp.id}
+                    style={[
+                      styles.radarBlip,
+                      { left: bx, top: by },
+                      rp.sector === 'ahead' && styles.radarBlipAhead
+                    ]}
+                  >
+                    <Text style={{ fontSize: 11 }}>{rp.emoji}</Text>
+                  </View>
+                );
+              })}
+            </View>
 
-            <TouchableOpacity style={styles.modalPrimaryBtn} onPress={handleAddCustomArea}>
-              <Text style={styles.modalPrimaryBtnText}>🔍 Scan This Area</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => setCustomAreaModalOpen(false)}
-              style={{ marginTop: 12 }}
-            >
-              <Text style={{ color: '#94a3b8', fontSize: 13 }}>Cancel</Text>
-            </TouchableOpacity>
+            <ScrollView style={{ width: '100%' }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.budgetSectionTitle}>
+                🎯 Directly Ahead of Your Phone (±30°)
+              </Text>
+              {radarPlaces.filter((p) => p.sector === 'ahead').length === 0 ? (
+                <Text style={styles.emptyHistoryText}>
+                  No spots within ±30° of {heading}°. Slowly rotate your phone left or right!
+                </Text>
+              ) : (
+                radarPlaces
+                  .filter((p) => p.sector === 'ahead')
+                  .slice(0, 6)
+                  .map((p) => (
+                    <TouchableOpacity
+                      key={p.id}
+                      style={styles.radarSpotRow}
+                      onPress={() => {
+                        setRadarModalOpen(false);
+                        startNavigation(p);
+                      }}
+                    >
+                      <Text style={{ fontSize: 22, marginRight: 10 }}>{p.emoji}</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.txTitle} numberOfLines={1}>
+                          {p.name}
+                        </Text>
+                        <Text style={styles.txSub}>
+                          ⬆️ Straight Ahead ({p.absAngle}° off) • {p.distanceText} • ~₱
+                          {estimateTranspoFare(p.distanceMeters, 'driving')} fare
+                        </Text>
+                      </View>
+                      <Text style={{ color: '#34d399', fontWeight: '800', fontSize: 12 }}>
+                        Focus ➔
+                      </Text>
+                    </TouchableOpacity>
+                  ))
+              )}
+
+              <Text style={[styles.budgetSectionTitle, { marginTop: 10 }]}>
+                ↔️ Slightly Left or Right
+              </Text>
+              {radarPlaces
+                .filter((p) => p.sector === 'left' || p.sector === 'right')
+                .slice(0, 6)
+                .map((p) => (
+                  <TouchableOpacity
+                    key={p.id}
+                    style={styles.radarSpotRow}
+                    onPress={() => {
+                      setRadarModalOpen(false);
+                      startNavigation(p);
+                    }}
+                  >
+                    <Text style={{ fontSize: 20, marginRight: 10 }}>{p.emoji}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.txTitle} numberOfLines={1}>
+                        {p.name}
+                      </Text>
+                      <Text style={styles.txSub}>
+                        {p.sector === 'left' ? '↖️ Turn Left' : '↗️ Turn Right'} ({p.absAngle}°) •{' '}
+                        {p.distanceText}
+                      </Text>
+                    </View>
+                    <Text style={{ color: '#60a5fa', fontWeight: '800', fontSize: 12 }}>
+                      Go ➔
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Clean Area / City / Municipality / Barangay Picker Modal */}
+      <Modal visible={customAreaModalOpen} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { maxWidth: 370 }]}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>📍 Choose Area or Town</Text>
+              <TouchableOpacity onPress={() => setCustomAreaModalOpen(false)}>
+                <Text style={{ color: '#94a3b8', fontSize: 18, fontWeight: '700' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubLeft}>
+              Select a city/municipality below or type any barangay, town, or country:
+            </Text>
+
+            <View style={styles.customTownSearchRow}>
+              <TextInput
+                style={[styles.diaryInput, { flex: 1, marginBottom: 0 }]}
+                placeholder="Type any town / city (e.g. Unisan, Tokyo)..."
+                placeholderTextColor="#64748b"
+                value={customAreaInput}
+                onChangeText={setCustomAreaInput}
+                onSubmitEditing={handleAddCustomArea}
+              />
+              <TouchableOpacity style={styles.customTownGoBtn} onPress={handleAddCustomArea}>
+                <Text style={{ color: '#fff', fontWeight: '800', fontSize: 12 }}>Go</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.areaGrid}>
+              {areaList.map((item) => {
+                const isAct = activeArea && activeArea.id === item.id;
+                return (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[styles.areaGridItem, isAct && styles.areaGridItemActive]}
+                    onPress={() => {
+                      handleSelectArea(item);
+                      setCustomAreaModalOpen(false);
+                    }}
+                  >
+                    <Text
+                      style={[styles.areaGridText, isAct && styles.areaGridTextActive]}
+                      numberOfLines={1}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Quick Cravings & Hotel Filter Modal (Keeps main UI super clean!) */}
+      <Modal visible={cravingModalOpen} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { maxWidth: 370 }]}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>⚡ Quick Cravings & Stays</Text>
+              <TouchableOpacity onPress={() => setCravingModalOpen(false)}>
+                <Text style={{ color: '#94a3b8', fontSize: 18, fontWeight: '700' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubLeft}>
+              Tap what you're looking for to deep-search {activeArea.label}:
+            </Text>
+
+            <View style={styles.areaGrid}>
+              {CRAVINGS.map((item) => {
+                const isAct = activeCraving === item.id;
+                return (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[styles.areaGridItem, isAct && styles.areaGridItemActive]}
+                    onPress={() => {
+                      handleCravingPress(item);
+                      setCravingModalOpen(false);
+                    }}
+                  >
+                    <Text
+                      style={[styles.areaGridText, isAct && styles.areaGridTextActive]}
+                      numberOfLines={1}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {activeCraving && (
+              <TouchableOpacity
+                style={{ marginTop: 14 }}
+                onPress={() => {
+                  setActiveCraving(null);
+                  setSearchQuery('');
+                  setCravingModalOpen(false);
+                }}
+              >
+                <Text style={{ color: '#f87171', fontSize: 13, fontWeight: '700' }}>
+                  ✕ Clear Craving Filter
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       </Modal>
@@ -1021,7 +1736,7 @@ export default function App() {
 
               <TextInput
                 style={styles.diaryInput}
-                placeholder="Write a note (e.g. Great room / Best overload lomi)"
+                placeholder="Write a note (e.g. Clean rooms / Best lomi in town)"
                 placeholderTextColor="#64748b"
                 value={draftNote}
                 onChangeText={setDraftNote}
@@ -1049,7 +1764,8 @@ export default function App() {
               <Text style={{ fontSize: 48, marginBottom: 8 }}>{rouletteWinner.emoji}</Text>
               <Text style={styles.modalTitle}>{rouletteWinner.name}</Text>
               <Text style={styles.modalSub}>
-                {rouletteWinner.typeLabel} • {rouletteWinner.distanceText} away
+                {rouletteWinner.typeLabel} • {rouletteWinner.distanceText} away • ~₱
+                {estimateTranspoFare(rouletteWinner.distanceMeters, 'driving')} ride
               </Text>
               <TouchableOpacity
                 style={styles.modalPrimaryBtn}
@@ -1059,7 +1775,7 @@ export default function App() {
                   startNavigation(target);
                 }}
               >
-                <Text style={styles.modalPrimaryBtnText}>🚶 Show Path & Let's Go!</Text>
+                <Text style={styles.modalPrimaryBtnText}>🚶 Focus & Show Path</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => setRouletteWinner(null)}
@@ -1072,7 +1788,7 @@ export default function App() {
         </View>
       </Modal>
 
-      {/* Arrival Celebration Modal */}
+      {/* Arrival Celebration Modal (Connected to Budget Tracker & Diary!) */}
       <Modal visible={!!arrivalPlace} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           {arrivalPlace && (
@@ -1085,10 +1801,20 @@ export default function App() {
                 onPress={() => {
                   const p = arrivalPlace;
                   setArrivalPlace(null);
+                  openSpendForPlace(p);
+                }}
+              >
+                <Text style={styles.modalPrimaryBtnText}>💸 Log Food & Transpo Spend</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalSecondaryBtn, { marginTop: 8 }]}
+                onPress={() => {
+                  const p = arrivalPlace;
+                  setArrivalPlace(null);
                   openDiaryModal(p);
                 }}
               >
-                <Text style={styles.modalPrimaryBtnText}>⭐ Rate & Add Note</Text>
+                <Text style={styles.modalSecondaryBtnText}>⭐ Rate & Add Note</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => setArrivalPlace(null)}
@@ -1107,347 +1833,412 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#e5e3df',
+    backgroundColor: '#0b0f19',
     paddingTop: Platform.OS === 'android' ? RNStatusBar.currentHeight || 0 : 0
   },
   mapWrap: { flex: 1 },
-  fabCol: {
+
+  // Floating Top Header (Modern Glass Card Stack)
+  topFloatingHeader: {
     position: 'absolute',
-    right: 12,
-    top: Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) + 12 : 52,
-    gap: 10,
-    zIndex: 20
+    top: Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) + 10 : 50,
+    left: 14,
+    right: 14,
+    zIndex: 25,
+    gap: 8
   },
-  fabBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 13,
-    backgroundColor: 'rgba(16, 22, 34, 0.92)',
+  topBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+  locationSelectorPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    maxWidth: '58%'
+  },
+  gpsDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#10b981',
+    marginRight: 8
+  },
+  locationSelectorText: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '700'
+  },
+  locationChevron: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginLeft: 6
+  },
+  topRightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6
+  },
+  weatherPill: {
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)'
+  },
+  weatherPillText: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  topIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 999,
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
     alignItems: 'center',
     justifyContent: 'center'
   },
-  fabText: { fontSize: 18 },
+  floatingSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  modernSearchBox: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    height: 46,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)'
+  },
+  modernSearchInput: {
+    flex: 1,
+    color: '#ffffff',
+    fontSize: 13.5,
+    fontWeight: '500'
+  },
+  clearSearchBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 4
+  },
+  modernActionBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  modernActionBtnActive: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#60a5fa'
+  },
+  modernRouletteBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.4)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+
+  // Navigation HUD
   navHud: {
     position: 'absolute',
     top: Platform.OS === 'android' ? (RNStatusBar.currentHeight || 24) + 10 : 50,
-    left: 12,
-    right: 66,
-    backgroundColor: 'rgba(12, 18, 28, 0.96)',
-    borderRadius: 16,
+    left: 14,
+    right: 14,
+    backgroundColor: 'rgba(15, 23, 42, 0.96)',
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.45)',
-    padding: 12,
+    padding: 14,
     zIndex: 30
   },
-  turnBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
+  turnBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
   turnIconBox: {
     width: 44,
     height: 44,
-    borderRadius: 12,
+    borderRadius: 14,
     backgroundColor: '#10b981',
     alignItems: 'center',
     justifyContent: 'center'
   },
   turnIconText: { fontSize: 22 },
-  turnInstruction: { color: '#fff', fontSize: 14, fontWeight: '800' },
-  turnSub: { color: '#34d399', fontSize: 11.5, marginTop: 2 },
+  turnInstruction: { color: '#fff', fontSize: 14.5, fontWeight: '800' },
+  turnSub: { color: '#34d399', fontSize: 12, marginTop: 2, fontWeight: '600' },
   shareHudBtn: {
     width: 36,
     height: 36,
-    borderRadius: 10,
+    borderRadius: 11,
     backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  closeHudBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 11,
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
     alignItems: 'center',
     justifyContent: 'center'
   },
   compassBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.16)',
-    borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.35)',
-    borderRadius: 9,
-    paddingVertical: 5,
+    backgroundColor: 'rgba(59, 130, 246, 0.14)',
+    borderRadius: 10,
+    paddingVertical: 6,
     paddingHorizontal: 10,
-    marginBottom: 8
+    marginBottom: 10
   },
-  compassArrow: { fontSize: 16, marginRight: 8 },
+  compassArrow: { fontSize: 15, marginRight: 8 },
   compassText: { color: '#93c5fd', fontSize: 11.5 },
   statsGrid: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 10,
-    paddingVertical: 8,
-    marginBottom: 8
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 12,
+    paddingVertical: 9,
+    marginBottom: 10
   },
   statCell: { flex: 1, alignItems: 'center' },
-  statVal: { color: '#fff', fontSize: 14, fontWeight: '800' },
-  statLbl: { color: '#94a3b8', fontSize: 9.5, marginTop: 2 },
+  statDivider: { width: 1, height: 22, backgroundColor: 'rgba(255,255,255,0.08)' },
+  statVal: { color: '#fff', fontSize: 14.5, fontWeight: '800' },
+  statLbl: { color: '#64748b', fontSize: 9.5, fontWeight: '700', marginTop: 2 },
   progressTrack: {
-    height: 7,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    height: 6,
+    backgroundColor: 'rgba(255,255,255,0.08)',
     borderRadius: 99,
     overflow: 'hidden',
     marginBottom: 10
   },
   progressFill: { height: '100%', backgroundColor: '#10b981' },
-  navControlsRow: { flexDirection: 'row', gap: 5 },
+  navControlsRow: { flexDirection: 'row', gap: 6 },
   navBtn: {
     flex: 1,
-    paddingVertical: 7,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.07)',
     alignItems: 'center'
   },
-  navBtnActive: { backgroundColor: 'rgba(59, 130, 246, 0.35)' },
-  stopBtn: { backgroundColor: 'rgba(239, 68, 68, 0.2)', flex: 0.75 },
-  navBtnText: { color: '#fff', fontSize: 10.5, fontWeight: '700' },
+  navBtnActive: { backgroundColor: 'rgba(59, 130, 246, 0.32)' },
+  navBtnText: { color: '#f1f5f9', fontSize: 11, fontWeight: '700' },
   stepsDrawer: {
-    marginTop: 8,
+    marginTop: 10,
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.1)',
+    borderTopColor: 'rgba(255,255,255,0.08)',
     gap: 4
   },
   stepRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingVertical: 4,
-    paddingHorizontal: 6,
-    borderRadius: 6
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    borderRadius: 8
   },
-  stepRowActive: { backgroundColor: 'rgba(16,185,129,0.2)' },
+  stepRowActive: { backgroundColor: 'rgba(16,185,129,0.18)' },
   stepText: { color: '#cbd5e1', fontSize: 11.5, flex: 1 },
   stepDist: { color: '#94a3b8', fontSize: 11, marginLeft: 8 },
+
+  // Clean Modern Bottom Sheet
   bottomSheet: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: '56%',
-    backgroundColor: 'rgba(16, 22, 34, 0.96)',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1,
+    height: '46%',
+    backgroundColor: '#0f172a',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
     zIndex: 25
   },
-  bottomSheetMinimized: { height: 78 },
-  sheetHandleWrap: { alignItems: 'center', paddingVertical: 7 },
+  bottomSheetMinimized: { height: 74 },
+  sheetHandleWrap: { alignItems: 'center', paddingVertical: 8 },
   sheetHandle: {
-    width: 40,
-    height: 5,
+    width: 38,
+    height: 4,
     borderRadius: 99,
-    backgroundColor: 'rgba(255,255,255,0.28)'
+    backgroundColor: 'rgba(255,255,255,0.22)'
   },
-  headerRow: {
+  minimizedBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 6
+    paddingHorizontal: 18
   },
-  brandGroup: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  brandIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    backgroundColor: '#ff5722',
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  brandTitle: { color: '#fff', fontSize: 15, fontWeight: '800' },
-  brandSub: { color: '#38bdf8', fontSize: 11, fontWeight: '600' },
-  gpsBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+  minimizedTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
+  minimizedSub: { color: '#64748b', fontSize: 11.5, marginTop: 2 },
+  minimizedStopBtn: {
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
     borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.35)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 99
-  },
-  gpsDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#10b981',
-    marginRight: 6
-  },
-  gpsBadgeText: { color: '#34d399', fontSize: 11, fontWeight: '700' },
-  searchRow: { flexDirection: 'row', paddingHorizontal: 14, gap: 8, marginBottom: 5 },
-  searchBox: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(10, 14, 23, 0.85)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 11,
-    paddingHorizontal: 10,
-    height: 36
-  },
-  searchInput: { flex: 1, color: '#fff', fontSize: 12.5 },
-  rouletteBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 11,
-    backgroundColor: 'rgba(245, 158, 11, 0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.45)',
-    alignItems: 'center',
-    justifyContent: 'center'
-  },
-  chipsList: { paddingHorizontal: 14, alignItems: 'center', gap: 6 },
-  areaChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(16, 185, 129, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
-    marginRight: 6
-  },
-  areaChipActive: {
-    backgroundColor: '#10b981',
-    borderColor: '#34d399'
-  },
-  areaChipText: { color: '#6ee7b7', fontSize: 11, fontWeight: '700' },
-  areaChipTextActive: { color: '#fff' },
-  addAreaChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(245, 158, 11, 0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.4)',
-    marginRight: 6
-  },
-  addAreaText: { color: '#fbbf24', fontSize: 11, fontWeight: '700' },
-  cravingChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: 'rgba(59, 130, 246, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
-    marginRight: 6
-  },
-  cravingChipActive: {
-    backgroundColor: '#3b82f6',
-    borderColor: '#60a5fa'
-  },
-  cravingText: { color: '#93c5fd', fontSize: 11, fontWeight: '600' },
-  cravingTextActive: { color: '#fff' },
-  chip: {
+    borderColor: 'rgba(239, 68, 68, 0.4)',
     paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 99,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    marginRight: 6
+    paddingVertical: 7,
+    borderRadius: 10
   },
-  chipActive: { backgroundColor: '#ff5722' },
-  chipText: { color: '#94a3b8', fontSize: 11.5, fontWeight: '600' },
-  chipTextActive: { color: '#fff' },
+  minimizedStopText: { color: '#fca5a5', fontSize: 11.5, fontWeight: '700' },
+  minimizedExpandBtn: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10
+  },
+  minimizedExpandText: { color: '#e2e8f0', fontSize: 11.5, fontWeight: '700' },
+
+  categoryBarWrap: { height: 40, marginBottom: 4 },
+  cleanChipsList: { paddingHorizontal: 16, alignItems: 'center', gap: 8 },
+  cleanChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)'
+  },
+  cleanChipActive: {
+    backgroundColor: '#f8fafc',
+    borderColor: '#ffffff'
+  },
+  cleanChipText: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
+  cleanChipTextActive: { color: '#0f172a', fontWeight: '800' },
+
   subToolbar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 5,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: 'rgba(255,255,255,0.07)',
-    marginBottom: 6
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginBottom: 4
   },
+  spotCountText: { color: '#94a3b8', fontSize: 12, fontWeight: '700' },
   radiusPill: {
     paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: 6,
+    paddingHorizontal: 9,
+    borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.06)'
   },
-  subToolbarText: { color: '#cbd5e1', fontSize: 11, fontWeight: '600' },
+  radiusPillText: { color: '#e2e8f0', fontSize: 11.5, fontWeight: '700' },
+  refreshMiniBtn: {
+    padding: 4,
+    borderRadius: 999
+  },
   modeGroup: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 999,
     padding: 2
   },
-  modeBtn: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 6 },
-  modeBtnActive: { backgroundColor: '#3b82f6' },
-  modeBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
+  modeBtn: { paddingHorizontal: 11, paddingVertical: 5, borderRadius: 999 },
+  modeBtnActive: { backgroundColor: '#10b981' },
+  modeBtnText: { color: '#94a3b8', fontSize: 11.5, fontWeight: '700' },
+  modeBtnTextActive: { color: '#ffffff' },
+
   emptyBox: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  emptyText: { color: '#94a3b8', fontSize: 13, textAlign: 'center' },
+  emptyText: { color: '#64748b', fontSize: 13, fontWeight: '600', textAlign: 'center' },
+
+  // Modern Place Cards
   placeCard: {
-    backgroundColor: 'rgba(26, 35, 52, 0.85)',
-    borderRadius: 12,
-    padding: 11,
-    marginBottom: 8,
+    backgroundColor: '#162033',
+    borderRadius: 18,
+    padding: 14,
+    marginBottom: 10,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.07)'
+    borderColor: 'rgba(255,255,255,0.06)'
   },
   placeCardSelected: {
     borderColor: '#10b981',
-    backgroundColor: 'rgba(16, 185, 129, 0.14)'
+    backgroundColor: 'rgba(16, 185, 129, 0.12)'
   },
-  cardTop: { flexDirection: 'row', alignItems: 'center' },
+  cardMainRow: { flexDirection: 'row', alignItems: 'center' },
   cardEmojiBox: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.07)',
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 87, 34, 0.14)',
     alignItems: 'center',
     justifyContent: 'center'
   },
-  placeName: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  placeMeta: { color: '#94a3b8', fontSize: 11.5, marginTop: 2 },
-  diaryBadge: { color: '#fbbf24', fontSize: 11, fontWeight: '600', marginTop: 3 },
-  distPill: {
-    backgroundColor: 'rgba(59, 130, 246, 0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.35)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8
-  },
-  distPillText: { color: '#60a5fa', fontSize: 11.5, fontWeight: '700' },
-  cardBottom: {
+  cardEmojiHotel: { backgroundColor: 'rgba(56, 189, 248, 0.14)' },
+  cardEmojiCafe: { backgroundColor: 'rgba(168, 85, 247, 0.14)' },
+  placeName: { color: '#f8fafc', fontSize: 15, fontWeight: '800' },
+  placeMeta: { color: '#94a3b8', fontSize: 12, marginTop: 2 },
+  diaryBadge: { color: '#fbbf24', fontSize: 11.5, fontWeight: '600', marginTop: 3 },
+  distValueText: { color: '#f8fafc', fontSize: 13.5, fontWeight: '800' },
+  etaSubText: { color: '#64748b', fontSize: 11.5, fontWeight: '600', marginTop: 2 },
+
+  cardFooterRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 8,
-    paddingTop: 8,
+    marginTop: 12,
+    paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.06)'
+    borderTopColor: 'rgba(255,255,255,0.05)'
   },
-  etaLabel: { color: '#cbd5e1', fontSize: 11.5 },
-  goBtn: {
-    backgroundColor: '#10b981',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+  cardIconActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  cardActionPill: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
     borderRadius: 8
   },
-  goBtnText: { color: '#fff', fontSize: 11.5, fontWeight: '700' },
+  cardActionPillText: { color: '#cbd5e1', fontSize: 11.5, fontWeight: '600' },
+  goBtn: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 10
+  },
+  goBtnActive: { backgroundColor: '#059669' },
+  goBtnText: { color: '#ffffff', fontSize: 12, fontWeight: '800' },
+
+  // Modals
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.72)',
+    backgroundColor: 'rgba(2, 6, 23, 0.78)',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24
+    padding: 20
   },
   modalCard: {
     width: '100%',
     maxWidth: 340,
-    backgroundColor: '#131b2e',
-    borderRadius: 20,
-    padding: 24,
+    backgroundColor: '#0f172a',
+    borderRadius: 24,
+    padding: 22,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)'
+    borderColor: 'rgba(255,255,255,0.12)'
   },
-  modalTitle: { color: '#fff', fontSize: 19, fontWeight: '800', textAlign: 'center' },
+  modalHeaderRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6
+  },
+  modalTitle: { color: '#f8fafc', fontSize: 18, fontWeight: '800' },
   modalSub: {
     color: '#94a3b8',
     fontSize: 12.5,
@@ -1455,13 +2246,60 @@ const styles = StyleSheet.create({
     marginTop: 6,
     marginBottom: 14
   },
+  modalSubLeft: {
+    width: '100%',
+    color: '#94a3b8',
+    fontSize: 12.5,
+    marginBottom: 12
+  },
+  customTownSearchRow: {
+    width: '100%',
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 14
+  },
+  customTownGoBtn: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  areaGrid: {
+    width: '100%',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8
+  },
+  areaGridItem: {
+    width: '48%',
+    backgroundColor: '#162033',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)'
+  },
+  areaGridItemActive: {
+    backgroundColor: 'rgba(16, 185, 129, 0.18)',
+    borderColor: '#10b981'
+  },
+  areaGridText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  areaGridTextActive: {
+    color: '#34d399',
+    fontWeight: '800'
+  },
   diaryInput: {
     width: '100%',
-    backgroundColor: 'rgba(10, 14, 23, 0.9)',
+    backgroundColor: '#162033',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 10,
-    paddingHorizontal: 12,
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     color: '#fff',
     fontSize: 13,
@@ -1469,10 +2307,418 @@ const styles = StyleSheet.create({
   },
   modalPrimaryBtn: {
     width: '100%',
-    backgroundColor: '#ff5722',
-    paddingVertical: 12,
-    borderRadius: 12,
+    backgroundColor: '#10b981',
+    paddingVertical: 13,
+    borderRadius: 14,
     alignItems: 'center'
   },
-  modalPrimaryBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' }
+  modalPrimaryBtnText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  modalSecondaryBtn: {
+    width: '100%',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    paddingVertical: 11,
+    borderRadius: 14,
+    alignItems: 'center'
+  },
+  modalSecondaryBtnText: { color: '#e2e8f0', fontSize: 13, fontWeight: '700' },
+
+  // Wallet & Radar Top Bar & Category Pills
+  walletTopPill: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderWidth: 1,
+    borderColor: '#10b981',
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    borderRadius: 999
+  },
+  walletTopPillLow: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    borderColor: '#f87171'
+  },
+  walletTopPillText: {
+    color: '#34d399',
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  modernRadarBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 16,
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  spendHudBtn: {
+    paddingHorizontal: 10,
+    height: 36,
+    borderRadius: 11,
+    backgroundColor: 'rgba(16, 185, 129, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  walletCategoryChip: {
+    paddingHorizontal: 13,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(16, 185, 129, 0.16)',
+    borderWidth: 1,
+    borderColor: '#10b981'
+  },
+  walletCategoryChipText: {
+    color: '#34d399',
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  radarCategoryChip: {
+    paddingHorizontal: 13,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
+    borderWidth: 1,
+    borderColor: '#38bdf8'
+  },
+  radarCategoryChipText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  pinHereChip: {
+    paddingVertical: 3,
+    paddingHorizontal: 9,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.06)'
+  },
+  pinHereChipText: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '700'
+  },
+  savedPinChip: {
+    paddingVertical: 3,
+    paddingHorizontal: 9,
+    borderRadius: 999,
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
+    borderWidth: 1,
+    borderColor: '#f59e0b'
+  },
+  savedPinChipText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '800'
+  },
+  placeAddressSub: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 2
+  },
+  cardSpendPill: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.35)',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8
+  },
+  cardSpendPillText: {
+    color: '#34d399',
+    fontSize: 11.5,
+    fontWeight: '800'
+  },
+
+  // Budget Tracker Modal Styles
+  walletHeroCard: {
+    width: '100%',
+    backgroundColor: '#132a28',
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    marginTop: 6,
+    marginBottom: 12
+  },
+  walletHeroLabel: {
+    color: '#6ee7b7',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.6
+  },
+  walletHeroBalance: {
+    color: '#ffffff',
+    fontSize: 28,
+    fontWeight: '900',
+    marginTop: 2
+  },
+  futureEarnBox: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    alignItems: 'flex-end'
+  },
+  futureEarnLabel: {
+    color: '#94a3b8',
+    fontSize: 9,
+    fontWeight: '800'
+  },
+  futureEarnVal: {
+    color: '#38bdf8',
+    fontSize: 14,
+    fontWeight: '800',
+    marginTop: 1
+  },
+  walletStatsStrip: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)'
+  },
+  walletStatItem: {
+    color: '#cbd5e1',
+    fontSize: 11.5,
+    fontWeight: '700'
+  },
+  claimSalaryBtn: {
+    marginTop: 10,
+    backgroundColor: '#10b981',
+    paddingVertical: 8,
+    borderRadius: 10,
+    alignItems: 'center'
+  },
+  claimSalaryBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '800'
+  },
+  budgetTabRow: {
+    width: '100%',
+    flexDirection: 'row',
+    backgroundColor: '#162033',
+    borderRadius: 12,
+    padding: 3,
+    marginBottom: 12
+  },
+  budgetTabBtn: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 9,
+    alignItems: 'center'
+  },
+  budgetTabBtnActive: {
+    backgroundColor: '#0f172a'
+  },
+  budgetTabBtnText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700'
+  },
+  budgetTabBtnTextActive: {
+    color: '#ffffff',
+    fontWeight: '800'
+  },
+  budgetOverviewBox: {
+    width: '100%'
+  },
+  budgetSectionTitle: {
+    color: '#94a3b8',
+    fontSize: 11.5,
+    fontWeight: '800',
+    marginBottom: 8,
+    textTransform: 'uppercase'
+  },
+  budgetActionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#162033',
+    padding: 12,
+    borderRadius: 14,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)'
+  },
+  budgetActionTitle: {
+    color: '#f8fafc',
+    fontSize: 13.5,
+    fontWeight: '800'
+  },
+  budgetActionSub: {
+    color: '#94a3b8',
+    fontSize: 11.5,
+    marginTop: 2
+  },
+  inputLabel: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 6
+  },
+  quickPlacePickChip: {
+    backgroundColor: '#162033',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)'
+  },
+  quickPlacePickText: {
+    color: '#e2e8f0',
+    fontSize: 11.5,
+    fontWeight: '700'
+  },
+  quickAmountRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 12
+  },
+  quickAmtChip: {
+    backgroundColor: '#162033',
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)'
+  },
+  quickAmtText: {
+    color: '#34d399',
+    fontSize: 11.5,
+    fontWeight: '800'
+  },
+  mathPreviewBox: {
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    alignItems: 'center'
+  },
+  mathPreviewLine: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '600'
+  },
+  mathPreviewResult: {
+    color: '#34d399',
+    fontSize: 15,
+    fontWeight: '900',
+    marginTop: 3
+  },
+  dividerLine: {
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    marginVertical: 14
+  },
+  emptyHistoryText: {
+    color: '#64748b',
+    fontSize: 12.5,
+    textAlign: 'center',
+    paddingVertical: 18
+  },
+  txRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#162033',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 8
+  },
+  txTitle: {
+    color: '#f8fafc',
+    fontSize: 13.5,
+    fontWeight: '800'
+  },
+  txSub: {
+    color: '#94a3b8',
+    fontSize: 11.5,
+    marginTop: 2
+  },
+  txDate: {
+    color: '#64748b',
+    fontSize: 10.5,
+    marginTop: 2
+  },
+  txAmount: {
+    fontSize: 14,
+    fontWeight: '900'
+  },
+
+  // Feature #14: Point-Your-Phone Radar Styles
+  radarCircle: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: '#0b1324',
+    borderWidth: 2,
+    borderColor: 'rgba(56, 189, 248, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+    position: 'relative',
+    overflow: 'hidden'
+  },
+  radarRingInner: {
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.2)',
+    position: 'absolute'
+  },
+  radarCone: {
+    position: 'absolute',
+    top: 0,
+    width: 68,
+    height: 70,
+    backgroundColor: 'rgba(16, 185, 129, 0.16)',
+    borderBottomLeftRadius: 40,
+    borderBottomRightRadius: 40
+  },
+  radarCenterDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#3b82f6',
+    borderWidth: 2,
+    borderColor: '#fff'
+  },
+  radarHeadingBadge: {
+    position: 'absolute',
+    bottom: 6,
+    color: '#38bdf8',
+    fontSize: 10,
+    fontWeight: '800'
+  },
+  radarBlip: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  radarBlipAhead: {
+    backgroundColor: 'rgba(16, 185, 129, 0.45)',
+    borderWidth: 1,
+    borderColor: '#34d399'
+  },
+  radarSpotRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#162033',
+    padding: 11,
+    borderRadius: 12,
+    marginBottom: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)'
+  }
 });
