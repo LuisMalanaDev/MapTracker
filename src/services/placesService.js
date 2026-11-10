@@ -1,5 +1,5 @@
 // ============================================================================
-// src/services/placesService.js — Multi-Engine Restaurant Radar & Google Search
+// src/services/placesService.js — Multi-Engine Restaurant & Hotel Radar
 // Combines: Google Maps Live Embed + ArcGIS Commercial POIs + Overpass + Nominatim
 // ============================================================================
 
@@ -13,6 +13,24 @@ const HEADERS = {
     'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
   Accept: 'text/html,application/json,*/*'
 };
+
+// Pre-configured Cities, Municipalities (Bayan), & Tourist Towns
+export const AREA_PRESETS = [
+  { id: 'gps', label: '📍 Near Me (GPS)', lat: null, lng: null },
+  { id: 'lucena', label: '🏙️ Lucena City', lat: 13.9414, lng: 121.6234, query: 'Lucena City' },
+  { id: 'tayabas', label: '🏛️ Tayabas', lat: 14.0263, lng: 121.5928, query: 'Tayabas Quezon' },
+  { id: 'san_pablo', label: '🏞️ San Pablo', lat: 14.069, lng: 121.3256, query: 'San Pablo Laguna' },
+  { id: 'sariaya', label: '🌾 Sariaya', lat: 13.9631, lng: 121.5262, query: 'Sariaya Quezon' },
+  { id: 'pagbilao', label: '🏖️ Pagbilao', lat: 13.9744, lng: 121.6881, query: 'Pagbilao Quezon' },
+  { id: 'lucban', label: '⛰️ Lucban', lat: 14.1136, lng: 121.5556, query: 'Lucban Quezon' },
+  { id: 'candelaria', label: '🌿 Candelaria', lat: 13.9311, lng: 121.4233, query: 'Candelaria Quezon' },
+  { id: 'tiaong', label: '🌊 Tiaong', lat: 13.9547, lng: 121.3228, query: 'Tiaong Quezon' },
+  { id: 'dolores', label: '⛰️ Dolores', lat: 14.0167, lng: 121.4011, query: 'Dolores Quezon' },
+  { id: 'mauban', label: '🏝️ Mauban', lat: 14.1892, lng: 121.7308, query: 'Mauban Quezon' },
+  { id: 'gumaca', label: '⚓ Gumaca', lat: 13.9214, lng: 122.0989, query: 'Gumaca Quezon' },
+  { id: 'lipa', label: '🌋 Lipa / Batangas', lat: 13.9411, lng: 121.1622, query: 'Lipa Batangas' },
+  { id: 'tagaytay', label: '🌲 Tagaytay', lat: 14.1153, lng: 120.9621, query: 'Tagaytay' }
+];
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
   return Promise.race([
@@ -39,8 +57,39 @@ export function formatDistance(meters) {
 
 function resolveEmojiAndLabel(tags = {}) {
   const amenity = (tags.amenity || '').toLowerCase();
+  const tourism = (tags.tourism || '').toLowerCase();
   const cuisine = (tags.cuisine || '').toLowerCase();
   const name = (tags.name || '').toLowerCase();
+
+  // Hotels, Resorts, Inns, Motels, Staycations
+  if (
+    tourism === 'hotel' ||
+    tourism === 'motel' ||
+    tourism === 'guest_house' ||
+    tourism === 'resort' ||
+    tourism === 'hostel' ||
+    tourism === 'apartment' ||
+    tourism === 'chalet' ||
+    cuisine.includes('hotel') ||
+    cuisine.includes('resort') ||
+    cuisine.includes('motel') ||
+    cuisine.includes('lodging') ||
+    name.includes('hotel') ||
+    name.includes('resort') ||
+    name.includes('motel') ||
+    name.includes('inn') ||
+    name.includes('lodge') ||
+    name.includes('staycation') ||
+    name.includes('pension') ||
+    name.includes('suites') ||
+    name.includes('dormitel') ||
+    name.includes('villa')
+  ) {
+    if (name.includes('resort') || tourism === 'resort' || name.includes('villa')) {
+      return { emoji: '🌴', label: 'Resort & Staycation', category: 'hotel' };
+    }
+    return { emoji: '🏨', label: 'Hotel & Lodging', category: 'hotel' };
+  }
 
   if (
     cuisine.includes('pizza') ||
@@ -109,19 +158,20 @@ function resolveEmojiAndLabel(tags = {}) {
 
 // ============================================================================
 // 1. GOOGLE MAPS DIRECT SEARCH ENGINE (Zero API Key Required!)
-// Pulls exact Google Maps places, coordinates, addresses & star ratings
+// Pulls exact Google Maps restaurants, hotels, resorts, addresses & star ratings
 // ============================================================================
-export async function searchGoogleMapsDirect(queryText, userLat, userLng) {
+export async function searchGoogleMapsDirect(queryText, centerLat, centerLng, userLat, userLng) {
+  const refLat = userLat || centerLat;
+  const refLng = userLng || centerLng;
   const results = [];
   try {
     const url = `https://maps.google.com/maps?q=${encodeURIComponent(
       queryText
-    )}&sll=${userLat},${userLng}&hl=en&output=embed`;
+    )}&sll=${centerLat},${centerLng}&hl=en&output=embed`;
 
-    const res = await fetchWithTimeout(url, { headers: HEADERS }, 6000);
+    const res = await fetchWithTimeout(url, { headers: HEADERS }, 6500);
     const html = await res.text();
 
-    // Parse Google Maps initEmbed JSON blocks: ["0x...:0x...","Full Name, Address",[lat,lng]
     const regex = /\["(0x[0-9a-f]+:0x[0-9a-f]+)","([^"]+)",\[(-?\d+\.\d+),(-?\d+\.\d+)\]/g;
     let match;
     const seenHex = new Set();
@@ -136,17 +186,21 @@ export async function searchGoogleMapsDirect(queryText, userLat, userLng) {
       const lng = parseFloat(match[4]);
       if (isNaN(lat) || isNaN(lng)) continue;
 
-      // Extract optional rating nearby in the payload
-      const tail = html.slice(match.index, match.index + 320);
+      const tail = html.slice(match.index, match.index + 340);
       const ratingMatch = tail.match(/,(\d\.\d)\d*,"(\d+[^"]*reviews?)"/i);
       const ratingText = ratingMatch ? `⭐ ${ratingMatch[1]} (${ratingMatch[2]})` : '';
+      const isHotelGcid = tail.includes('hotel') || tail.includes('lodging') || tail.includes('resort');
 
       const parts = fullTitle.split(',');
       const name = parts[0].trim();
       const address = parts.slice(1, 3).join(',').trim() || 'Google Maps Verified';
 
-      const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
-      const { emoji, label, category } = resolveEmojiAndLabel({ name });
+      const distMeters = getDistanceMeters(refLat, refLng, lat, lng);
+      const { emoji, label, category } = resolveEmojiAndLabel({
+        name,
+        tourism: isHotelGcid ? 'hotel' : '',
+        cuisine: queryText.toLowerCase().includes('hotel') ? 'hotel' : ''
+      });
 
       results.push({
         id: `gmap_${hexId}`,
@@ -173,17 +227,26 @@ function decodeUnicodeEscapes(str) {
 }
 
 // ============================================================================
-// 2. ARCGIS WORLD COMMERCIAL POI ENGINE (50+ Nearby Commercial Restaurants)
+// 2. ARCGIS WORLD COMMERCIAL POI ENGINE (Food + Hotels & Resorts)
 // ============================================================================
-async function fetchArcGISFoodPOIs(userLat, userLng, radiusMeters = 2000, keyword = '') {
+async function fetchArcGISPOIs(
+  centerLat,
+  centerLng,
+  userLat,
+  userLng,
+  radiusMeters = 2500,
+  keyword = ''
+) {
+  const refLat = userLat || centerLat;
+  const refLng = userLng || centerLng;
   const results = [];
   try {
     const qParam = keyword
-      ? `SingleLine=${encodeURIComponent(keyword)}&category=Food`
-      : `category=Food`;
-    const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&${qParam}&location=${userLng},${userLat}&distance=${Math.max(
+      ? `SingleLine=${encodeURIComponent(keyword)}&category=Food,Hotel,Motel,Resort,Lodging`
+      : `category=Food,Hotel,Motel,Resort,Bed and Breakfast,Lodging`;
+    const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&${qParam}&location=${centerLng},${centerLat}&distance=${Math.max(
       radiusMeters,
-      2000
+      2500
     )}&maxLocations=50&outFields=PlaceName,Place_addr,Type`;
 
     const res = await fetchWithTimeout(url, { headers: HEADERS }, 5500);
@@ -199,10 +262,11 @@ async function fetchArcGISFoodPOIs(userLat, userLng, radiusMeters = 2000, keywor
         const addr =
           (c.attributes && c.attributes.Place_addr) ||
           (c.attributes && c.attributes.Type) ||
-          'Commercial Food Spot';
-        const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
-        if (!keyword && distMeters > radiusMeters * 1.5) return;
+          'Commercial Spot';
+        const distFromCenter = getDistanceMeters(centerLat, centerLng, lat, lng);
+        if (!keyword && distFromCenter > radiusMeters * 2.2) return;
 
+        const distMeters = getDistanceMeters(refLat, refLng, lat, lng);
         const { emoji, label, category } = resolveEmojiAndLabel({
           name,
           cuisine: c.attributes && c.attributes.Type
@@ -228,33 +292,48 @@ async function fetchArcGISFoodPOIs(userLat, userLng, radiusMeters = 2000, keywor
 }
 
 // ============================================================================
-// 3. COMBINED NEARBY RESTAURANT SCANNER (Google Maps + ArcGIS + Overpass)
+// 3. COMBINED NEARBY SCANNER (Restaurants + Cafés + Hotels & Resorts)
+// Supports scanning around either live GPS or any selected Municipality/Town!
 // ============================================================================
-export async function fetchNearbyRestaurants(userLat, userLng, radiusMeters = 1500) {
-  const query = `[out:json][timeout:10];(node["amenity"~"restaurant|fast_food|cafe|food_court|ice_cream|bakery|bar|pub"](around:${radiusMeters},${userLat},${userLng});way["amenity"~"restaurant|fast_food|cafe|food_court|bakery"](around:${radiusMeters},${userLat},${userLng}););out center 100;`;
+export async function fetchNearbyRestaurants(
+  scanLat,
+  scanLng,
+  radiusMeters = 1500,
+  userLat = null,
+  userLng = null,
+  areaLabel = ''
+) {
+  const refLat = userLat || scanLat;
+  const refLng = userLng || scanLng;
+  const placeHint = areaLabel ? areaLabel.replace(/^[^\w]+/, '').trim() : `${scanLat},${scanLng}`;
 
-  const [googleRestaurants, googleCafes, arcgisFood, overpassFood] = await Promise.all([
-    searchGoogleMapsDirect(`restaurants near ${userLat},${userLng}`, userLat, userLng),
-    searchGoogleMapsDirect(`cafe fast food eatery near ${userLat},${userLng}`, userLat, userLng),
-    fetchArcGISFoodPOIs(userLat, userLng, radiusMeters),
-    fetchOverpassPOIs(query, userLat, userLng)
-  ]);
+  const overpassQuery = `[out:json][timeout:10];(node["amenity"~"restaurant|fast_food|cafe|food_court|ice_cream|bakery|bar|pub"](around:${radiusMeters},${scanLat},${scanLng});way["amenity"~"restaurant|fast_food|cafe|food_court|bakery"](around:${radiusMeters},${scanLat},${scanLng});node["tourism"~"hotel|motel|guest_house|resort|hostel|apartment|chalet"](around:${radiusMeters},${scanLat},${scanLng});way["tourism"~"hotel|motel|guest_house|resort|hostel|apartment"](around:${radiusMeters},${scanLat},${scanLng}););out center 120;`;
+
+  const [googleRestaurants, googleCafes, googleHotels, arcgisSpots, overpassSpots] =
+    await Promise.all([
+      searchGoogleMapsDirect(`restaurants in ${placeHint}`, scanLat, scanLng, refLat, refLng),
+      searchGoogleMapsDirect(`cafe fast food in ${placeHint}`, scanLat, scanLng, refLat, refLng),
+      searchGoogleMapsDirect(`hotels resorts inn in ${placeHint}`, scanLat, scanLng, refLat, refLng),
+      fetchArcGISPOIs(scanLat, scanLng, refLat, refLng, radiusMeters),
+      fetchOverpassPOIs(overpassQuery, refLat, refLng)
+    ]);
 
   const merged = deduplicatePlaces([
     ...googleRestaurants,
+    ...googleHotels,
     ...googleCafes,
-    ...arcgisFood,
-    ...overpassFood
+    ...arcgisSpots,
+    ...overpassSpots
   ]);
 
   if (merged.length > 0) {
     return merged.sort((a, b) => a.distanceMeters - b.distanceMeters);
   }
 
-  return generateFallbackPlaces(userLat, userLng);
+  return generateFallbackPlaces(scanLat, scanLng, refLat, refLng);
 }
 
-async function fetchOverpassPOIs(query, userLat, userLng) {
+async function fetchOverpassPOIs(query, refLat, refLng) {
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const res = await fetchWithTimeout(
@@ -272,14 +351,14 @@ async function fetchOverpassPOIs(query, userLat, userLng) {
       if (!res.ok) continue;
       const data = await res.json();
       if (data && data.elements && data.elements.length > 0) {
-        return parseOverpassElements(data.elements, userLat, userLng);
+        return parseOverpassElements(data.elements, refLat, refLng);
       }
     } catch (e) {}
   }
   return [];
 }
 
-function parseOverpassElements(elements, userLat, userLng) {
+function parseOverpassElements(elements, refLat, refLng) {
   const places = [];
   elements.forEach((el) => {
     const tags = el.tags || {};
@@ -290,9 +369,10 @@ function parseOverpassElements(elements, userLat, userLng) {
     const lng = el.lon || (el.center && el.center.lon);
     if (!lat || !lng) return;
 
-    const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
+    const distMeters = getDistanceMeters(refLat, refLng, lat, lng);
     const { emoji, label, category } = resolveEmojiAndLabel(tags);
-    const street = tags['addr:street'] || tags['addr:full'] || tags['addr:city'] || 'Nearby Street';
+    const street =
+      tags['addr:street'] || tags['addr:full'] || tags['addr:city'] || 'Verified Location';
 
     places.push({
       id: `osm_${el.id}`,
@@ -312,23 +392,34 @@ function parseOverpassElements(elements, userLat, userLng) {
 }
 
 // ============================================================================
-// 4. MULTI-ENGINE SEARCH (Google Maps Direct + ArcGIS + Nominatim + Photon)
+// 4. MULTI-ENGINE SEARCH (Supports Area/Town Context + Hotels + Restaurants)
 // ============================================================================
-export async function searchPlacesByQuery(queryText, userLat, userLng) {
+export async function searchPlacesByQuery(
+  queryText,
+  scanLat,
+  scanLng,
+  userLat = null,
+  userLng = null,
+  areaHint = ''
+) {
   if (!queryText || !queryText.trim()) return [];
   const q = queryText.trim();
+  const refLat = userLat || scanLat;
+  const refLng = userLng || scanLng;
+  const contextualQuery = areaHint ? `${q} ${areaHint}` : q;
 
-  const [googleHits, googleLocalHits, arcgisHits, nominatimHits, photonHits] = await Promise.all([
-    searchGoogleMapsDirect(q, userLat, userLng),
-    searchGoogleMapsDirect(`${q} near ${userLat},${userLng}`, userLat, userLng),
-    fetchArcGISFoodPOIs(userLat, userLng, 15000, q),
-    searchNominatim(q, userLat, userLng),
-    searchPhoton(q, userLat, userLng)
-  ]);
+  const [googleAreaHits, googleNearHits, arcgisHits, nominatimHits, photonHits] =
+    await Promise.all([
+      searchGoogleMapsDirect(contextualQuery, scanLat, scanLng, refLat, refLng),
+      searchGoogleMapsDirect(`${q} near ${scanLat},${scanLng}`, scanLat, scanLng, refLat, refLng),
+      fetchArcGISPOIs(scanLat, scanLng, refLat, refLng, 20000, contextualQuery),
+      searchNominatim(contextualQuery, refLat, refLng),
+      searchPhoton(contextualQuery, scanLat, scanLng, refLat, refLng)
+    ]);
 
   const combined = deduplicatePlaces([
-    ...googleLocalHits,
-    ...googleHits,
+    ...googleAreaHits,
+    ...googleNearHits,
     ...arcgisHits,
     ...nominatimHits,
     ...photonHits
@@ -337,7 +428,32 @@ export async function searchPlacesByQuery(queryText, userLat, userLng) {
   return combined.sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
-async function searchNominatim(queryText, userLat, userLng) {
+// Geocode any custom Town, Municipality, Barangay, or Province typed by the user
+export async function geocodeAreaLocation(areaName) {
+  if (!areaName || !areaName.trim()) return null;
+  const q = `${areaName.trim()}, Philippines`;
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+      q
+    )}&limit=1`;
+    const res = await fetchWithTimeout(url, { headers: HEADERS }, 5000);
+    const data = await res.json();
+    if (Array.isArray(data) && data.length > 0) {
+      const top = data[0];
+      const cleanLabel = (top.display_name || areaName).split(',')[0].trim();
+      return {
+        id: `custom_${Date.now()}`,
+        label: `📍 ${cleanLabel}`,
+        lat: parseFloat(top.lat),
+        lng: parseFloat(top.lon),
+        query: cleanLabel
+      };
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function searchNominatim(queryText, refLat, refLng) {
   const results = [];
   try {
     const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
@@ -351,9 +467,10 @@ async function searchNominatim(queryText, userLat, userLng) {
         const lng = parseFloat(item.lon);
         if (isNaN(lat) || isNaN(lng)) return;
         const name = (item.display_name || queryText).split(',')[0];
-        const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
+        const distMeters = getDistanceMeters(refLat, refLng, lat, lng);
         const { emoji, label, category } = resolveEmojiAndLabel({
           amenity: item.type,
+          tourism: item.class === 'tourism' ? item.type : '',
           name
         });
         results.push({
@@ -376,12 +493,12 @@ async function searchNominatim(queryText, userLat, userLng) {
   return results;
 }
 
-async function searchPhoton(queryText, userLat, userLng) {
+async function searchPhoton(queryText, scanLat, scanLng, refLat, refLng) {
   const results = [];
   try {
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(
       queryText
-    )}&lat=${userLat}&lon=${userLng}&limit=15`;
+    )}&lat=${scanLat}&lon=${scanLng}&limit=15`;
     const res = await fetchWithTimeout(url, { headers: HEADERS }, 5000);
     const data = await res.json();
 
@@ -391,9 +508,10 @@ async function searchPhoton(queryText, userLat, userLng) {
         const props = f.properties || {};
         const name = props.name || props.street || queryText;
         const addressParts = [props.street, props.district, props.city].filter(Boolean);
-        const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
+        const distMeters = getDistanceMeters(refLat, refLng, lat, lng);
         const { emoji, label, category } = resolveEmojiAndLabel({
           amenity: props.osm_value,
+          tourism: props.osm_key === 'tourism' ? props.osm_value : '',
           name
         });
 
@@ -416,9 +534,6 @@ async function searchPhoton(queryText, userLat, userLng) {
   return results;
 }
 
-// ============================================================================
-// 5. REVERSE GEOCODE ANY TAPPED POINT ON THE GOOGLE MAP
-// ============================================================================
 export async function reverseGeocodePoint(lat, lng, userLat, userLng) {
   const distMeters = getDistanceMeters(userLat, userLng, lat, lng);
   try {
@@ -491,9 +606,6 @@ export function recalculateDistances(places, userLat, userLng) {
     .sort((a, b) => a.distanceMeters - b.distanceMeters);
 }
 
-// ============================================================================
-// 6. LIVE WALK WEATHER & UMBRELLA/HEAT ADVISORY (Open-Meteo Free API)
-// ============================================================================
 export async function fetchLocalWeather(lat, lng) {
   try {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true`;
@@ -515,17 +627,17 @@ export async function fetchLocalWeather(lat, lng) {
   return { icon: '⛅', temp: '29°C', advice: 'Good walking weather' };
 }
 
-function generateFallbackPlaces(lat, lng) {
+function generateFallbackPlaces(scanLat, scanLng, refLat, refLng) {
   const samples = [
     { name: 'Jollibee Plaza', dLat: 0.0024, dLng: 0.0018, emoji: '🍔', typeLabel: 'Fast Food', category: 'fast_food' },
-    { name: "McDonald's Highway", dLat: -0.0035, dLng: 0.0041, emoji: '🍔', typeLabel: 'Fast Food', category: 'fast_food' },
+    { name: 'Queen Margarette Hotel', dLat: 0.0038, dLng: -0.0025, emoji: '🏨', typeLabel: 'Hotel & Lodging', category: 'hotel' },
     { name: "Tuboy's Lomi & Eatery", dLat: 0.0042, dLng: -0.0031, emoji: '🍜', typeLabel: 'Noodles & Asian', category: 'restaurant' }
   ];
 
   return samples.map((s, i) => {
-    const pLat = lat + s.dLat;
-    const pLng = lng + s.dLng;
-    const dist = getDistanceMeters(lat, lng, pLat, pLng);
+    const pLat = scanLat + s.dLat;
+    const pLng = scanLng + s.dLng;
+    const dist = getDistanceMeters(refLat, refLng, pLat, pLng);
     return {
       id: `sample_${i}`,
       name: s.name,
@@ -534,10 +646,10 @@ function generateFallbackPlaces(lat, lng) {
       category: s.category,
       emoji: s.emoji,
       typeLabel: s.typeLabel,
-      address: 'Nearby Main Road',
+      address: 'Main Highway District',
       distanceMeters: dist,
       distanceText: formatDistance(dist),
-      walkMinutes: Math.max(1, Math.round(distMeters / 78))
+      walkMinutes: Math.max(1, Math.round(dist / 78))
     };
   });
 }

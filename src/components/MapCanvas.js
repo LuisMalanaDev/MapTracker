@@ -104,6 +104,7 @@ const SELF_CONTAINED_MAP_HTML = `
     }
     .poi-pin.cafe { background: linear-gradient(135deg, #a855f7, #c084fc); }
     .poi-pin.fast_food { background: linear-gradient(135deg, #f59e0b, #fbbf24); }
+    .poi-pin.hotel { background: linear-gradient(135deg, #0284c7, #38bdf8); }
     .poi-pin.selected {
       transform: rotate(-45deg) scale(1.25);
       background: linear-gradient(135deg, #10b981, #34d399);
@@ -417,6 +418,13 @@ const SELF_CONTAINED_MAP_HTML = `
         zoom = 16;
         render();
       }
+      if (msg.type === 'PAN_TO_AREA') {
+        followUser = false;
+        centerLat = msg.lat;
+        centerLng = msg.lng;
+        zoom = msg.zoom || 15;
+        render();
+      }
       if (msg.type === 'CYCLE_LAYER') {
         tileStyle = (tileStyle + 1) % 3;
         render();
@@ -488,6 +496,7 @@ const MapCanvas = forwardRef(
       updateUser: (lat, lng, radius) =>
         sendCommand({ type: 'SYNC_STATE', userPos: { lat, lng }, radius }),
       recenter: (lat, lng) => sendCommand({ type: 'RECENTER', lat, lng }),
+      panToArea: (lat, lng, zoom = 15) => sendCommand({ type: 'PAN_TO_AREA', lat, lng, zoom }),
       cycleLayer: () => sendCommand({ type: 'CYCLE_LAYER' }),
       renderPOIs: (list, selId) =>
         sendCommand({ type: 'SYNC_STATE', places: list, selectedId: selId }),

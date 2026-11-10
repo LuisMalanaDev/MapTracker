@@ -1,7 +1,7 @@
 // ============================================================================
-// App.js — CraveNav Expo (React Native) Live Restaurant & Walking Path Tracker
-// Includes: Live Compass Arrow, Craving Pills, Haptic Vibrations, Share ETA,
-//           Live Weather Advisory & Personal Food Diary (Ratings + Notes)
+// App.js — CraveNav Expo (React Native) Live Restaurant, Hotel & Path Tracker
+// Includes: Hotels & Resorts, Municipality/Town/Barangay Filter Bar, Live Compass,
+//           Craving Pills, Haptic Vibrations, Share ETA, Weather & Food Diary
 // ============================================================================
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
@@ -27,8 +27,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import MapCanvas from './src/components/MapCanvas';
 import {
+  AREA_PRESETS,
   fetchNearbyRestaurants,
   searchPlacesByQuery,
+  geocodeAreaLocation,
   recalculateDistances,
   reverseGeocodePoint,
   fetchLocalWeather
@@ -42,7 +44,8 @@ import {
 } from './src/services/routeService';
 
 const CATEGORIES = [
-  { id: 'all', label: '🍽️ All Food' },
+  { id: 'all', label: '🍽️ All Spots' },
+  { id: 'hotel', label: '🏨 Hotels & Stays' },
   { id: 'restaurant', label: '🍜 Restaurants' },
   { id: 'fast_food', label: '🍔 Fast Food' },
   { id: 'cafe', label: '☕ Cafés & Boba' },
@@ -51,6 +54,8 @@ const CATEGORIES = [
 ];
 
 const CRAVINGS = [
+  { id: 'hotels', label: '🏨 Hotels & Inns', query: 'hotel inn motel lodge' },
+  { id: 'resorts', label: '🌴 Resorts & Staycation', query: 'resort villa staycation' },
   { id: 'lomi', label: '🍜 Lomi & Goto', query: 'lomi goto mami' },
   { id: 'samgyup', label: '🥩 Samgyup & Wings', query: 'samgyup unli wings bbq' },
   { id: 'boba', label: '🧋 Milk Tea & Coffee', query: 'milk tea cafe coffee' },
@@ -61,10 +66,10 @@ const CRAVINGS = [
 ];
 
 const RADII = [
-  { label: '800 m', value: 800 },
-  { label: '1.5 km', value: 1500 },
-  { label: '3.0 km', value: 3000 },
-  { label: '5.0 km', value: 5000 }
+  { label: '1.0 km', value: 1000 },
+  { label: '2.0 km', value: 2000 },
+  { label: '4.0 km', value: 4000 },
+  { label: '8.0 km', value: 8000 }
 ];
 
 export default function App() {
@@ -81,15 +86,21 @@ export default function App() {
   const [weather, setWeather] = useState({ icon: '⛅', temp: '29°C', advice: 'Good walking weather' });
   const [mapReady, setMapReady] = useState(false);
 
+  // Area / Municipality / Town / Barangay Filter State
+  const [areaList, setAreaList] = useState(AREA_PRESETS);
+  const [activeArea, setActiveArea] = useState(AREA_PRESETS[0]); // Default: 'gps' (Near Me)
+  const [customAreaModalOpen, setCustomAreaModalOpen] = useState(false);
+  const [customAreaInput, setCustomAreaInput] = useState('');
+
   const [allPlaces, setAllPlaces] = useState([]);
   const [loadingPlaces, setLoadingPlaces] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCraving, setActiveCraving] = useState(null);
   const [activeCategory, setActiveCategory] = useState('all');
-  const [radiusMeters, setRadiusMeters] = useState(1500);
+  const [radiusMeters, setRadiusMeters] = useState(2000);
   const [travelMode, setTravelMode] = useState('foot'); // 'foot' | 'driving'
   const [favorites, setFavorites] = useState([]);
-  const [diary, setDiary] = useState({}); // { [placeId]: { rating: 5, note: '...', visitedAt: '...' } }
+  const [diary, setDiary] = useState({});
   const [sheetMinimized, setSheetMinimized] = useState(false);
 
   // Active Navigation State
@@ -108,7 +119,7 @@ export default function App() {
   const [draftRating, setDraftRating] = useState(5);
   const [draftNote, setDraftNote] = useState('');
 
-  // Load saved favorites & food diary
+  // Load saved favorites & food/hotel diary
   useEffect(() => {
     AsyncStorage.getItem('cravenav_favs')
       .then((raw) => {
@@ -123,6 +134,14 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // Effective scan center (either Live GPS or the selected Municipality/Town/Barangay)
+  const scanCenter = useMemo(() => {
+    if (activeArea && activeArea.id !== 'gps' && activeArea.lat && activeArea.lng) {
+      return { lat: activeArea.lat, lng: activeArea.lng, label: activeArea.query || activeArea.label };
+    }
+    return { lat: userPos.lat, lng: userPos.lng, label: '' };
+  }, [activeArea, userPos]);
+
   // Start Native Hardware GPS + Compass Heading Tracking
   useEffect(() => {
     let gpsSub = null;
@@ -134,11 +153,10 @@ export default function App() {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') {
           setGpsStatus('City Center GPS');
-          loadNearby(13.9414, 121.6234, radiusMeters);
+          loadNearby(13.9414, 121.6234, radiusMeters, 13.9414, 121.6234, '');
           return;
         }
 
-        // 1. Instant last known position
         const lastKnown = await Location.getLastKnownPositionAsync();
         if (lastKnown && lastKnown.coords) {
           initialLoaded = true;
@@ -146,11 +164,10 @@ export default function App() {
           const lng = lastKnown.coords.longitude;
           setUserPos({ lat, lng });
           setGpsStatus('Live GPS Locked');
-          loadNearby(lat, lng, radiusMeters);
+          loadNearby(lat, lng, radiusMeters, lat, lng, '');
           fetchLocalWeather(lat, lng).then(setWeather);
         }
 
-        // 2. Continuous live GPS stream
         gpsSub = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.Balanced,
@@ -166,28 +183,26 @@ export default function App() {
 
             if (!initialLoaded) {
               initialLoaded = true;
-              loadNearby(lat, lng, radiusMeters);
+              loadNearby(lat, lng, radiusMeters, lat, lng, '');
               fetchLocalWeather(lat, lng).then(setWeather);
             }
           }
         );
 
-        // 3. Live Phone Compass Heading Watcher
         headingSub = await Location.watchHeadingAsync((h) => {
           const deg = h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
           if (typeof deg === 'number') setHeading(Math.round(deg));
         });
 
-        // 4. Safety fallback if indoors
         setTimeout(() => {
           if (!initialLoaded) {
             initialLoaded = true;
-            loadNearby(userPos.lat, userPos.lng, radiusMeters);
+            loadNearby(userPos.lat, userPos.lng, radiusMeters, userPos.lat, userPos.lng, '');
           }
         }, 3500);
       } catch (e) {
         setGpsStatus('GPS Fallback');
-        loadNearby(13.9414, 121.6234, radiusMeters);
+        loadNearby(13.9414, 121.6234, radiusMeters, 13.9414, 121.6234, '');
       }
     })();
 
@@ -198,7 +213,6 @@ export default function App() {
     };
   }, []);
 
-  // Compute live compass arrow direction toward destination
   const compassInfo = useMemo(() => {
     if (!selectedPlace) return null;
     const targetBearing = calculateBearing(
@@ -235,7 +249,6 @@ export default function App() {
         setLiveNav(state);
         mapRef.current?.updateWalkPath(state.remainingCoords, state.walkedCoords);
 
-        // New Turn Step Reached -> Voice + Pocket Haptic Buzz!
         if (state.activeStepIdx !== lastSpokenStepRef.current && state.currentStep) {
           lastSpokenStepRef.current = state.activeStepIdx;
           if (hapticsEnabled) {
@@ -247,7 +260,6 @@ export default function App() {
           }
         }
 
-        // Arrived at Restaurant -> Celebration Buzz + Modal!
         if (state.isArrived && !arrivedTriggeredRef.current) {
           arrivedTriggeredRef.current = true;
           stopWalkSimulator();
@@ -256,28 +268,65 @@ export default function App() {
           }
           setArrivalPlace(selectedPlace);
           if (voiceEnabled) {
-            Speech.speak(`You have arrived at ${selectedPlace.name}. Enjoy your meal!`);
+            Speech.speak(`You have arrived at ${selectedPlace.name}!`);
           }
         }
       }
     }
   }, [userPos, mapReady]);
 
-  async function loadNearby(lat, lng, rad) {
+  async function loadNearby(scanLat, scanLng, rad, uLat = userPos.lat, uLng = userPos.lng, areaName = '') {
     setLoadingPlaces(true);
-    const spots = await fetchNearbyRestaurants(lat, lng, rad);
+    const spots = await fetchNearbyRestaurants(scanLat, scanLng, rad, uLat, uLng, areaName);
     setAllPlaces(spots);
     setLoadingPlaces(false);
   }
 
-  // Remote Google Maps + Multi-Engine Search
+  // Handle selecting a City, Municipality, Town, or Barangay filter
+  async function handleSelectArea(area) {
+    if (hapticsEnabled) Vibration.vibrate(50);
+    setActiveArea(area);
+    setActiveCraving(null);
+    setSearchQuery('');
+
+    if (area.id === 'gps') {
+      mapRef.current?.recenter(userPos.lat, userPos.lng);
+      fetchLocalWeather(userPos.lat, userPos.lng).then(setWeather);
+      await loadNearby(userPos.lat, userPos.lng, radiusMeters, userPos.lat, userPos.lng, '');
+    } else {
+      mapRef.current?.panToArea(area.lat, area.lng, 14);
+      fetchLocalWeather(area.lat, area.lng).then(setWeather);
+      await loadNearby(area.lat, area.lng, Math.max(radiusMeters, 3000), userPos.lat, userPos.lng, area.query);
+    }
+  }
+
+  // Add any custom Town, Municipality, Barangay, or Province
+  async function handleAddCustomArea() {
+    if (!customAreaInput.trim()) return;
+    const found = await geocodeAreaLocation(customAreaInput.trim());
+    setCustomAreaModalOpen(false);
+    setCustomAreaInput('');
+    if (found) {
+      setAreaList((prev) => [prev[0], found, ...prev.slice(1)]);
+      handleSelectArea(found);
+    }
+  }
+
+  // Remote Google Maps + Multi-Engine Search (Scoped to active Town/Municipality or GPS)
   useEffect(() => {
     if (searchQuery.trim().length < 2) return;
     let cancelled = false;
     setLoadingPlaces(true);
 
     const timer = setTimeout(async () => {
-      const results = await searchPlacesByQuery(searchQuery.trim(), userPos.lat, userPos.lng);
+      const results = await searchPlacesByQuery(
+        searchQuery.trim(),
+        scanCenter.lat,
+        scanCenter.lng,
+        userPos.lat,
+        userPos.lng,
+        scanCenter.label
+      );
       if (cancelled) return;
       if (results.length > 0) {
         setAllPlaces((prev) => {
@@ -337,8 +386,20 @@ export default function App() {
       return;
     }
     setActiveCraving(craving.id);
+    if (craving.id === 'hotels' || craving.id === 'resorts') {
+      setActiveCategory('hotel');
+    } else {
+      setActiveCategory('all');
+    }
     setLoadingPlaces(true);
-    const hits = await searchPlacesByQuery(craving.query, userPos.lat, userPos.lng);
+    const hits = await searchPlacesByQuery(
+      craving.query,
+      scanCenter.lat,
+      scanCenter.lng,
+      userPos.lat,
+      userPos.lng,
+      scanCenter.label
+    );
     if (hits.length > 0) {
       setAllPlaces((prev) => {
         const ids = new Set(prev.map((p) => p.id));
@@ -368,11 +429,16 @@ export default function App() {
     setSheetMinimized(true);
     if (hapticsEnabled) Vibration.vibrate(60);
 
-    const route = await calculateStreetRoute(userPos.lat, userPos.lng, place, customMode);
+    // Automatically switch to Ride mode if destination is in another town (> 3.5 km away)
+    const effectiveMode =
+      place.distanceMeters > 3500 && customMode === 'foot' ? 'driving' : customMode;
+    if (effectiveMode !== travelMode) setTravelMode(effectiveMode);
+
+    const route = await calculateStreetRoute(userPos.lat, userPos.lng, place, effectiveMode);
     setActiveRoute(route);
     mapRef.current?.drawRoute(route.coords);
 
-    const state = computeLiveWalkState(userPos.lat, userPos.lng, route, place, customMode);
+    const state = computeLiveWalkState(userPos.lat, userPos.lng, route, place, effectiveMode);
     setLiveNav(state);
 
     if (voiceEnabled && route.steps && route.steps[0]) {
@@ -398,7 +464,7 @@ export default function App() {
     const gmapUrl = `https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lng}`;
     try {
       await Share.share({
-        message: `🍜 Heading to ${place.name} (${place.address})!\n📍 Distance: ${dist} away (~${mins} min)\n🗺️ Google Maps Pin: ${gmapUrl}`
+        message: `${place.emoji || '📍'} Heading to ${place.name} (${place.address})!\n📍 Distance: ${dist} away (~${mins} min)\n🗺️ Google Maps Pin: ${gmapUrl}`
       });
     } catch (e) {}
   }
@@ -478,7 +544,7 @@ export default function App() {
     const idx = Math.max(0, RADII.findIndex((r) => r.value === radiusMeters));
     const next = RADII[(idx + 1) % RADII.length].value;
     setRadiusMeters(next);
-    loadNearby(userPos.lat, userPos.lng, next);
+    loadNearby(scanCenter.lat, scanCenter.lng, next, userPos.lat, userPos.lng, scanCenter.label);
   }
 
   return (
@@ -504,7 +570,7 @@ export default function App() {
         />
       </View>
 
-      {/* Top Navigation HUD (Visible when routing to a restaurant) */}
+      {/* Top Navigation HUD */}
       {selectedPlace && liveNav && (
         <View style={styles.navHud}>
           <View style={styles.turnBanner}>
@@ -529,7 +595,6 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          {/* Feature 1: Live Compass "Just Follow the Arrow" Strip */}
           {compassInfo && (
             <View style={styles.compassBanner}>
               <Text style={styles.compassArrow}>{compassInfo.arrow}</Text>
@@ -540,7 +605,6 @@ export default function App() {
             </View>
           )}
 
-          {/* Live Shrinking Distance, ETA & Progress % */}
           <View style={styles.statsGrid}>
             <View style={styles.statCell}>
               <Text style={styles.statVal}>{liveNav.remainingText}</Text>
@@ -556,12 +620,10 @@ export default function App() {
             </View>
           </View>
 
-          {/* Progress Bar */}
           <View style={styles.progressTrack}>
             <View style={[styles.progressFill, { width: `${liveNav.progressPercent}%` }]} />
           </View>
 
-          {/* Controls Row */}
           <View style={styles.navControlsRow}>
             <TouchableOpacity
               style={[styles.navBtn, isSimulating && styles.navBtnActive]}
@@ -620,13 +682,25 @@ export default function App() {
       <View style={styles.fabCol}>
         <TouchableOpacity
           style={styles.fabBtn}
-          onPress={() => mapRef.current?.recenter(userPos.lat, userPos.lng)}
+          onPress={() => {
+            setActiveArea(areaList[0]);
+            mapRef.current?.recenter(userPos.lat, userPos.lng);
+          }}
         >
           <Text style={styles.fabText}>🎯</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.fabBtn}
-          onPress={() => loadNearby(userPos.lat, userPos.lng, radiusMeters)}
+          onPress={() =>
+            loadNearby(
+              scanCenter.lat,
+              scanCenter.lng,
+              radiusMeters,
+              userPos.lat,
+              userPos.lng,
+              scanCenter.label
+            )
+          }
         >
           <Text style={styles.fabText}>🔄</Text>
         </TouchableOpacity>
@@ -635,7 +709,7 @@ export default function App() {
         </TouchableOpacity>
       </View>
 
-      {/* Bottom Restaurant Explorer Sheet */}
+      {/* Bottom Restaurant & Hotel Explorer Sheet */}
       <View style={[styles.bottomSheet, sheetMinimized && styles.bottomSheetMinimized]}>
         <TouchableOpacity
           style={styles.sheetHandleWrap}
@@ -651,7 +725,7 @@ export default function App() {
               <Text style={{ fontSize: 19 }}>🍜</Text>
             </View>
             <View>
-              <Text style={styles.brandTitle}>CraveNav</Text>
+              <Text style={styles.brandTitle}>CraveNav • Food & Hotels</Text>
               <Text style={styles.brandSub}>
                 {weather.icon} {weather.temp} • {weather.advice}
               </Text>
@@ -671,7 +745,7 @@ export default function App() {
                 <Text style={{ marginRight: 6 }}>🔍</Text>
                 <TextInput
                   style={styles.searchInput}
-                  placeholder="Search any Google Maps restaurant..."
+                  placeholder="Search restaurants, hotels, resorts, cafés..."
                   placeholderTextColor="#64748b"
                   value={searchQuery}
                   onChangeText={(txt) => {
@@ -695,8 +769,42 @@ export default function App() {
               </TouchableOpacity>
             </View>
 
-            {/* Feature 2: 1-Tap "I'm Craving..." Quick Pills */}
+            {/* NEW: Municipality / Town / Barangay / City Filter Bar */}
             <View style={{ height: 34, marginBottom: 4 }}>
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                data={[...areaList, { id: 'add_custom', label: '➕ Any Town / Brgy...' }]}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.chipsList}
+                renderItem={({ item }) => {
+                  if (item.id === 'add_custom') {
+                    return (
+                      <TouchableOpacity
+                        style={styles.addAreaChip}
+                        onPress={() => setCustomAreaModalOpen(true)}
+                      >
+                        <Text style={styles.addAreaText}>{item.label}</Text>
+                      </TouchableOpacity>
+                    );
+                  }
+                  const isAct = activeArea && activeArea.id === item.id;
+                  return (
+                    <TouchableOpacity
+                      style={[styles.areaChip, isAct && styles.areaChipActive]}
+                      onPress={() => handleSelectArea(item)}
+                    >
+                      <Text style={[styles.areaChipText, isAct && styles.areaChipTextActive]}>
+                        {item.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+            </View>
+
+            {/* 1-Tap Craving & Hotel Quick Pills */}
+            <View style={{ height: 32, marginBottom: 4 }}>
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -724,8 +832,8 @@ export default function App() {
               />
             </View>
 
-            {/* Category Chips */}
-            <View style={{ height: 38 }}>
+            {/* Category Chips (All Spots, Hotels & Stays, Restaurants, Fast Food, Cafés, Saved, Tried) */}
+            <View style={{ height: 36 }}>
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -754,7 +862,8 @@ export default function App() {
             <View style={styles.subToolbar}>
               <TouchableOpacity onPress={cycleRadius} style={styles.radiusPill}>
                 <Text style={styles.subToolbarText}>
-                  {filteredPlaces.length} spots • {(radiusMeters / 1000).toFixed(1)} km ▾
+                  {filteredPlaces.length} spots in {activeArea.label.replace(/^[^\w]+/, '')} •{' '}
+                  {(radiusMeters / 1000).toFixed(1)} km ▾
                 </Text>
               </TouchableOpacity>
 
@@ -783,7 +892,9 @@ export default function App() {
             {/* Places List */}
             {loadingPlaces ? (
               <View style={styles.emptyBox}>
-                <Text style={styles.emptyText}>🔍 Scanning Google Maps & nearby spots...</Text>
+                <Text style={styles.emptyText}>
+                  🔍 Scanning restaurants & hotels in {activeArea.label}...
+                </Text>
               </View>
             ) : (
               <FlatList
@@ -824,7 +935,11 @@ export default function App() {
 
                       <View style={styles.cardBottom}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                          <Text style={styles.etaLabel}>🚶 ~{item.walkMinutes}m</Text>
+                          <Text style={styles.etaLabel}>
+                            {item.distanceMeters > 3500
+                              ? `🛵 ~${Math.max(1, Math.round(item.distanceMeters / 450))}m ride`
+                              : `🚶 ~${item.walkMinutes}m walk`}
+                          </Text>
                           <TouchableOpacity onPress={() => toggleFavorite(item.id)}>
                             <Text style={{ fontSize: 15 }}>{isFav ? '❤️' : '🤍'}</Text>
                           </TouchableOpacity>
@@ -852,16 +967,48 @@ export default function App() {
         )}
       </View>
 
-      {/* Feature 6: Personal Food Diary / Rating Modal */}
+      {/* Custom Town / Municipality / Barangay Modal */}
+      <Modal visible={customAreaModalOpen} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={{ fontSize: 38, marginBottom: 6 }}>🗺️</Text>
+            <Text style={styles.modalTitle}>Jump to Any Town or Barangay</Text>
+            <Text style={styles.modalSub}>
+              Enter any Municipality (Bayan), Barangay, District, or City to scan all its
+              restaurants & hotels:
+            </Text>
+
+            <TextInput
+              style={styles.diaryInput}
+              placeholder="e.g. Ibabang Dupay, Atimonan, Unisan, Calamba..."
+              placeholderTextColor="#64748b"
+              value={customAreaInput}
+              onChangeText={setCustomAreaInput}
+              onSubmitEditing={handleAddCustomArea}
+            />
+
+            <TouchableOpacity style={styles.modalPrimaryBtn} onPress={handleAddCustomArea}>
+              <Text style={styles.modalPrimaryBtnText}>🔍 Scan This Area</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setCustomAreaModalOpen(false)}
+              style={{ marginTop: 12 }}
+            >
+              <Text style={{ color: '#94a3b8', fontSize: 13 }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Personal Food & Hotel Diary Modal */}
       <Modal visible={!!diaryModalPlace} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           {diaryModalPlace && (
             <View style={styles.modalCard}>
               <Text style={{ fontSize: 38, marginBottom: 6 }}>{diaryModalPlace.emoji}</Text>
               <Text style={styles.modalTitle}>{diaryModalPlace.name}</Text>
-              <Text style={styles.modalSub}>Mark as Tried & Save Your Couple Food Note</Text>
+              <Text style={styles.modalSub}>Save Your Rating & Personal Note</Text>
 
-              {/* 1-5 Star Selector */}
               <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
                 {[1, 2, 3, 4, 5].map((star) => (
                   <TouchableOpacity key={star} onPress={() => setDraftRating(star)}>
@@ -874,14 +1021,14 @@ export default function App() {
 
               <TextInput
                 style={styles.diaryInput}
-                placeholder="What should we order next time? (e.g. Overload Lomi)"
+                placeholder="Write a note (e.g. Great room / Best overload lomi)"
                 placeholderTextColor="#64748b"
                 value={draftNote}
                 onChangeText={setDraftNote}
               />
 
               <TouchableOpacity style={styles.modalPrimaryBtn} onPress={saveDiaryEntry}>
-                <Text style={styles.modalPrimaryBtnText}>✅ Save to Food Diary</Text>
+                <Text style={styles.modalPrimaryBtnText}>✅ Save to Diary</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => setDiaryModalPlace(null)}
@@ -894,7 +1041,7 @@ export default function App() {
         </View>
       </Modal>
 
-      {/* Random Restaurant Roulette Modal */}
+      {/* Random Roulette Modal */}
       <Modal visible={!!rouletteWinner} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           {rouletteWinner && (
@@ -902,8 +1049,7 @@ export default function App() {
               <Text style={{ fontSize: 48, marginBottom: 8 }}>{rouletteWinner.emoji}</Text>
               <Text style={styles.modalTitle}>{rouletteWinner.name}</Text>
               <Text style={styles.modalSub}>
-                {rouletteWinner.typeLabel} • {rouletteWinner.distanceText} away (~
-                {rouletteWinner.walkMinutes} min walk)
+                {rouletteWinner.typeLabel} • {rouletteWinner.distanceText} away
               </Text>
               <TouchableOpacity
                 style={styles.modalPrimaryBtn}
@@ -931,11 +1077,9 @@ export default function App() {
         <View style={styles.modalBackdrop}>
           {arrivalPlace && (
             <View style={styles.modalCard}>
-              <Text style={{ fontSize: 48, marginBottom: 8 }}>🎉🍽️</Text>
+              <Text style={{ fontSize: 48, marginBottom: 8 }}>🎉🏁</Text>
               <Text style={styles.modalTitle}>You Have Arrived!</Text>
-              <Text style={styles.modalSub}>
-                You made it to {arrivalPlace.name}! Enjoy your meal!
-              </Text>
+              <Text style={styles.modalSub}>You made it to {arrivalPlace.name}!</Text>
               <TouchableOpacity
                 style={styles.modalPrimaryBtn}
                 onPress={() => {
@@ -944,7 +1088,7 @@ export default function App() {
                   openDiaryModal(p);
                 }}
               >
-                <Text style={styles.modalPrimaryBtnText}>⭐ Rate & Add Food Note</Text>
+                <Text style={styles.modalPrimaryBtnText}>⭐ Rate & Add Note</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => setArrivalPlace(null)}
@@ -1081,7 +1225,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    height: '52%',
+    height: '56%',
     backgroundColor: 'rgba(16, 22, 34, 0.96)',
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
@@ -1090,7 +1234,7 @@ const styles = StyleSheet.create({
     zIndex: 25
   },
   bottomSheetMinimized: { height: 78 },
-  sheetHandleWrap: { alignItems: 'center', paddingVertical: 8 },
+  sheetHandleWrap: { alignItems: 'center', paddingVertical: 7 },
   sheetHandle: {
     width: 40,
     height: 5,
@@ -1102,18 +1246,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingBottom: 8
+    paddingBottom: 6
   },
   brandGroup: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   brandIcon: {
-    width: 36,
-    height: 36,
+    width: 34,
+    height: 34,
     borderRadius: 10,
     backgroundColor: '#ff5722',
     alignItems: 'center',
     justifyContent: 'center'
   },
-  brandTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  brandTitle: { color: '#fff', fontSize: 15, fontWeight: '800' },
   brandSub: { color: '#38bdf8', fontSize: 11, fontWeight: '600' },
   gpsBadge: {
     flexDirection: 'row',
@@ -1133,7 +1277,7 @@ const styles = StyleSheet.create({
     marginRight: 6
   },
   gpsBadgeText: { color: '#34d399', fontSize: 11, fontWeight: '700' },
-  searchRow: { flexDirection: 'row', paddingHorizontal: 14, gap: 8, marginBottom: 6 },
+  searchRow: { flexDirection: 'row', paddingHorizontal: 14, gap: 8, marginBottom: 5 },
   searchBox: {
     flex: 1,
     flexDirection: 'row',
@@ -1143,12 +1287,12 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
     borderRadius: 11,
     paddingHorizontal: 10,
-    height: 38
+    height: 36
   },
-  searchInput: { flex: 1, color: '#fff', fontSize: 13 },
+  searchInput: { flex: 1, color: '#fff', fontSize: 12.5 },
   rouletteBtn: {
-    width: 38,
-    height: 38,
+    width: 36,
+    height: 36,
     borderRadius: 11,
     backgroundColor: 'rgba(245, 158, 11, 0.22)',
     borderWidth: 1,
@@ -1157,6 +1301,31 @@ const styles = StyleSheet.create({
     justifyContent: 'center'
   },
   chipsList: { paddingHorizontal: 14, alignItems: 'center', gap: 6 },
+  areaChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    marginRight: 6
+  },
+  areaChipActive: {
+    backgroundColor: '#10b981',
+    borderColor: '#34d399'
+  },
+  areaChipText: { color: '#6ee7b7', fontSize: 11, fontWeight: '700' },
+  areaChipTextActive: { color: '#fff' },
+  addAreaChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: 'rgba(245, 158, 11, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.4)',
+    marginRight: 6
+  },
+  addAreaText: { color: '#fbbf24', fontSize: 11, fontWeight: '700' },
   cravingChip: {
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -1199,7 +1368,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: 'rgba(255,255,255,0.06)'
   },
-  subToolbarText: { color: '#cbd5e1', fontSize: 11.5, fontWeight: '600' },
+  subToolbarText: { color: '#cbd5e1', fontSize: 11, fontWeight: '600' },
   modeGroup: {
     flexDirection: 'row',
     backgroundColor: 'rgba(255,255,255,0.06)',
@@ -1210,7 +1379,7 @@ const styles = StyleSheet.create({
   modeBtnActive: { backgroundColor: '#3b82f6' },
   modeBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   emptyBox: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  emptyText: { color: '#94a3b8', fontSize: 13 },
+  emptyText: { color: '#94a3b8', fontSize: 13, textAlign: 'center' },
   placeCard: {
     backgroundColor: 'rgba(26, 35, 52, 0.85)',
     borderRadius: 12,
@@ -1278,10 +1447,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.15)'
   },
-  modalTitle: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center' },
+  modalTitle: { color: '#fff', fontSize: 19, fontWeight: '800', textAlign: 'center' },
   modalSub: {
     color: '#94a3b8',
-    fontSize: 13,
+    fontSize: 12.5,
     textAlign: 'center',
     marginTop: 6,
     marginBottom: 14
