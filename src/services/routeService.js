@@ -1,5 +1,6 @@
 // ============================================================================
-// src/services/routeService.js — OSRM Street Routing & Live Walk Progress
+// src/services/routeService.js — Multi-Engine Street Routing & Live Rerouting
+// Includes: Exact Street Segment Snapping + Automatic Off-Route Detection
 // ============================================================================
 
 import { getDistanceMeters, formatDistance } from './placesService';
@@ -29,48 +30,71 @@ function formatStepInstruction(step, destName) {
   return `Proceed${mod}${street}`;
 }
 
-export async function calculateStreetRoute(userLat, userLng, place, travelMode = 'foot') {
-  const profile = travelMode === 'driving' ? 'driving' : 'foot';
-  const url = `https://router.project-osrm.org/route/v1/${profile}/${userLng},${userLat};${place.lng},${place.lat}?overview=full&geometries=geojson&steps=true`;
-
+async function fetchWithTimeout(url, timeoutMs = 5500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url);
-    const data = await res.json();
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    return await res.json();
+  } catch (e) {
+    clearTimeout(timer);
+    return null;
+  }
+}
 
+export async function calculateStreetRoute(userLat, userLng, place, travelMode = 'foot') {
+  const endpoints =
+    travelMode === 'driving'
+      ? [
+          `https://routing.openstreetmap.de/routed-car/route/v1/driving/${userLng},${userLat};${place.lng},${place.lat}?overview=full&geometries=geojson&steps=true`,
+          `https://router.project-osrm.org/route/v1/driving/${userLng},${userLat};${place.lng},${place.lat}?overview=full&geometries=geojson&steps=true`
+        ]
+      : [
+          `https://routing.openstreetmap.de/routed-foot/route/v1/foot/${userLng},${userLat};${place.lng},${place.lat}?overview=full&geometries=geojson&steps=true`,
+          `https://router.project-osrm.org/route/v1/foot/${userLng},${userLat};${place.lng},${place.lat}?overview=full&geometries=geojson&steps=true`,
+          `https://routing.openstreetmap.de/routed-car/route/v1/driving/${userLng},${userLat};${place.lng},${place.lat}?overview=full&geometries=geojson&steps=true`
+        ];
+
+  for (const url of endpoints) {
+    const data = await fetchWithTimeout(url, 5500);
     if (data && data.routes && data.routes.length > 0) {
       const route = data.routes[0];
       const coordsLatLng = route.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
-      const rawSteps = (route.legs && route.legs[0] && route.legs[0].steps) || [];
+      if (coordsLatLng.length >= 2) {
+        const rawSteps = (route.legs && route.legs[0] && route.legs[0].steps) || [];
 
-      const steps = rawSteps.map((s, idx) => ({
-        index: idx,
-        instruction: formatStepInstruction(s, place.name),
-        icon: getTurnIcon(s.maneuver),
-        distanceMeters: s.distance || 0,
-        distanceText: formatDistance(s.distance || 0),
-        location:
-          s.maneuver && s.maneuver.location
-            ? [s.maneuver.location[1], s.maneuver.location[0]]
-            : coordsLatLng[0]
-      }));
+        const steps = rawSteps.map((s, idx) => ({
+          index: idx,
+          instruction: formatStepInstruction(s, place.name),
+          icon: getTurnIcon(s.maneuver),
+          distanceMeters: s.distance || 0,
+          distanceText: formatDistance(s.distance || 0),
+          location:
+            s.maneuver && s.maneuver.location
+              ? [s.maneuver.location[1], s.maneuver.location[0]]
+              : coordsLatLng[0]
+        }));
 
-      const totalDist = route.distance || getDistanceMeters(userLat, userLng, place.lat, place.lng);
-      const durationMinutes =
-        travelMode === 'driving'
-          ? Math.max(1, Math.round(totalDist / 450))
-          : Math.max(1, Math.round(totalDist / 78));
+        const totalDist =
+          route.distance || getDistanceMeters(userLat, userLng, place.lat, place.lng);
+        const durationMinutes =
+          travelMode === 'driving'
+            ? Math.max(1, Math.round(totalDist / 450))
+            : Math.max(1, Math.round(totalDist / 78));
 
-      return {
-        coords: coordsLatLng,
-        steps,
-        initialDistanceMeters: Math.max(totalDist, 10),
-        totalDistanceMeters: totalDist,
-        durationMinutes
-      };
+        return {
+          coords: coordsLatLng,
+          steps,
+          initialDistanceMeters: Math.max(totalDist, 10),
+          totalDistanceMeters: totalDist,
+          durationMinutes
+        };
+      }
     }
-  } catch (e) {}
+  }
 
-  // Fallback straight line if routing server is offline
+  // Fallback only if device is completely offline
   const directDist = getDistanceMeters(userLat, userLng, place.lat, place.lng);
   return {
     coords: [
@@ -80,7 +104,7 @@ export async function calculateStreetRoute(userLat, userLng, place, travelMode =
     steps: [
       {
         index: 0,
-        instruction: `Walk directly toward ${place.name}`,
+        instruction: `Head toward ${place.name}`,
         icon: '⬆️',
         distanceMeters: directDist,
         distanceText: formatDistance(directDist),
@@ -101,23 +125,66 @@ export async function calculateStreetRoute(userLat, userLng, place, travelMode =
   };
 }
 
+// Project user position onto the exact closest point on road segment AB
+function projectOntoSegment(pLat, pLng, aLat, aLng, bLat, bLng) {
+  const dx = bLng - aLng;
+  const dy = bLat - aLat;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) {
+    return {
+      lat: aLat,
+      lng: aLng,
+      t: 0,
+      distMeters: getDistanceMeters(pLat, pLng, aLat, aLng)
+    };
+  }
+  let t = ((pLng - aLng) * dx + (pLat - aLat) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const projLat = aLat + t * dy;
+  const projLng = aLng + t * dx;
+  return {
+    lat: projLat,
+    lng: projLng,
+    t,
+    distMeters: getDistanceMeters(pLat, pLng, projLat, projLng)
+  };
+}
+
 export function computeLiveWalkState(userLat, userLng, routeData, destPlace, travelMode = 'foot') {
-  if (!routeData || !destPlace) return null;
+  if (!routeData || !destPlace || !routeData.coords || routeData.coords.length === 0) return null;
 
   const coords = routeData.coords;
-  let closestIdx = 0;
-  let minPointDist = Infinity;
+  let bestSegIdx = 0;
+  let bestProj = {
+    lat: coords[0][0],
+    lng: coords[0][1],
+    t: 0,
+    distMeters: getDistanceMeters(userLat, userLng, coords[0][0], coords[0][1])
+  };
 
-  for (let i = 0; i < coords.length; i++) {
-    const d = getDistanceMeters(userLat, userLng, coords[i][0], coords[i][1]);
-    if (d < minPointDist) {
-      minPointDist = d;
-      closestIdx = i;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const proj = projectOntoSegment(
+      userLat,
+      userLng,
+      coords[i][0],
+      coords[i][1],
+      coords[i + 1][0],
+      coords[i + 1][1]
+    );
+    if (proj.distMeters < bestProj.distMeters) {
+      bestProj = proj;
+      bestSegIdx = i;
     }
   }
 
-  let remainingAlongPath = getDistanceMeters(userLat, userLng, coords[closestIdx][0], coords[closestIdx][1]);
-  for (let i = closestIdx; i < coords.length - 1; i++) {
+  // Calculate remaining distance along the street path starting from the projected road point
+  let remainingAlongPath = getDistanceMeters(
+    bestProj.lat,
+    bestProj.lng,
+    coords[bestSegIdx + 1] ? coords[bestSegIdx + 1][0] : coords[bestSegIdx][0],
+    coords[bestSegIdx + 1] ? coords[bestSegIdx + 1][1] : coords[bestSegIdx][1]
+  );
+  for (let i = bestSegIdx + 1; i < coords.length - 1; i++) {
     remainingAlongPath += getDistanceMeters(
       coords[i][0],
       coords[i][1],
@@ -127,13 +194,16 @@ export function computeLiveWalkState(userLat, userLng, routeData, destPlace, tra
   }
 
   const directToDest = getDistanceMeters(userLat, userLng, destPlace.lat, destPlace.lng);
-  const effectiveRemaining = Math.min(remainingAlongPath, directToDest * 1.35);
-  const initialDist = routeData.initialDistanceMeters || 100;
+  const effectiveRemaining = Math.max(directToDest * 0.85, remainingAlongPath);
+  const initialDist = routeData.initialDistanceMeters || Math.max(effectiveRemaining, 100);
 
   const progressPercent =
     directToDest <= 24
       ? 100
-      : Math.min(100, Math.max(0, Math.round(((initialDist - effectiveRemaining) / initialDist) * 100)));
+      : Math.min(
+          100,
+          Math.max(0, Math.round(((initialDist - effectiveRemaining) / initialDist) * 100))
+        );
 
   const remainingMins =
     travelMode === 'driving'
@@ -142,7 +212,7 @@ export function computeLiveWalkState(userLat, userLng, routeData, destPlace, tra
 
   let activeStepIdx = 0;
   let minStepDist = Infinity;
-  routeData.steps.forEach((step, idx) => {
+  (routeData.steps || []).forEach((step, idx) => {
     const sd = getDistanceMeters(userLat, userLng, step.location[0], step.location[1]);
     if (sd < minStepDist) {
       minStepDist = sd;
@@ -150,9 +220,18 @@ export function computeLiveWalkState(userLat, userLng, routeData, destPlace, tra
     }
   });
 
-  const currentStep = routeData.steps[activeStepIdx] || routeData.steps[0];
-  const walkedCoords = coords.slice(0, closestIdx + 1);
-  const remainingCoords = [[userLat, userLng], ...coords.slice(closestIdx + 1)];
+  const currentStep = (routeData.steps && routeData.steps[activeStepIdx]) ||
+    (routeData.steps && routeData.steps[0]) || {
+      icon: '⬆️',
+      instruction: `Head to ${destPlace.name}`
+    };
+
+  // Start the remaining green street line from the exact projected road point (never cut across blocks!)
+  const walkedCoords = [...coords.slice(0, bestSegIdx + 1), [bestProj.lat, bestProj.lng]];
+  const remainingCoords = [[bestProj.lat, bestProj.lng], ...coords.slice(bestSegIdx + 1)];
+
+  // If the user walked/drove onto a different street (> 25m away from the current road line), flag for live reroute!
+  const needsReroute = bestProj.distMeters > 25 && directToDest > 35;
 
   return {
     remainingMeters: effectiveRemaining,
@@ -161,9 +240,11 @@ export function computeLiveWalkState(userLat, userLng, routeData, destPlace, tra
     progressPercent,
     currentStep,
     activeStepIdx,
-    steps: routeData.steps,
+    steps: routeData.steps || [],
     walkedCoords,
     remainingCoords,
+    offRouteMeters: Math.round(bestProj.distMeters),
+    needsReroute,
     isArrived: directToDest <= 24
   };
 }

@@ -85,6 +85,8 @@ export default function App() {
   const lastHeadingValRef = useRef(0);
   const lastDistCalcPosRef = useRef({ lat: 0, lng: 0 });
   const headingNeededRef = useRef(false);
+  const lastRerouteTimeRef = useRef(0);
+  const reroutingInFlightRef = useRef(false);
 
   const [userPos, setUserPos] = useState({ lat: 13.9414, lng: 121.6234 });
   const [heading, setHeading] = useState(0);
@@ -609,6 +611,41 @@ export default function App() {
       if (state) {
         setLiveNav(state);
         mapRef.current?.updateWalkPath(state.remainingCoords, state.walkedCoords);
+
+        // Automatic Live Off-Route Street Rerouting (when user takes a different street/path)
+        const now = Date.now();
+        if (
+          state.needsReroute &&
+          !reroutingInFlightRef.current &&
+          now - lastRerouteTimeRef.current > 4000
+        ) {
+          reroutingInFlightRef.current = true;
+          lastRerouteTimeRef.current = now;
+          calculateStreetRoute(userPos.lat, userPos.lng, selectedPlace, travelMode)
+            .then((freshRoute) => {
+              if (freshRoute && freshRoute.coords && freshRoute.coords.length >= 2) {
+                setActiveRoute(freshRoute);
+                const freshState = computeLiveWalkState(
+                  userPos.lat,
+                  userPos.lng,
+                  freshRoute,
+                  selectedPlace,
+                  travelMode
+                );
+                if (freshState) {
+                  setLiveNav(freshState);
+                  mapRef.current?.updateWalkPath(
+                    freshState.remainingCoords,
+                    freshState.walkedCoords
+                  );
+                }
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              reroutingInFlightRef.current = false;
+            });
+        }
 
         if (state.activeStepIdx !== lastSpokenStepRef.current && state.currentStep) {
           lastSpokenStepRef.current = state.activeStepIdx;
