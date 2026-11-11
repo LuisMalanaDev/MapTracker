@@ -796,10 +796,8 @@ export default function App() {
   }
 
   async function handleMapTap(lat, lng) {
-    if (hapticsEnabled) Vibration.vibrate(70);
-    const spot = await reverseGeocodePoint(lat, lng, userPos.lat, userPos.lng);
-    setAllPlaces((prev) => recalculateDistances([spot, ...prev], userPos.lat, userPos.lng));
-    startNavigation(spot);
+    // Do not change or cancel destination when clicking on the map
+    if (selectedPlace) return;
   }
 
   async function startNavigation(place, customMode = travelMode) {
@@ -809,6 +807,9 @@ export default function App() {
     setSelectedPlace(place);
     setSheetMinimized(true);
     if (hapticsEnabled) Vibration.vibrate(60);
+
+    // Immediately zoom map to frame ONLY You + Selected Destination clearly
+    mapRef.current?.focusPair(place.lat, place.lng);
 
     // Automatically switch to Ride mode if destination is in another town (> 3.5 km away)
     const effectiveMode =
@@ -938,7 +939,18 @@ export default function App() {
           ref={mapRef}
           userPos={userPos}
           radiusMeters={radiusMeters}
-          places={selectedPlace ? [selectedPlace] : filteredPlaces}
+          places={
+            selectedPlace
+              ? [
+                  {
+                    ...selectedPlace,
+                    livePinSub: liveNav
+                      ? `${liveNav.remainingText} • ~${liveNav.remainingMins} min`
+                      : `${selectedPlace.distanceText || ''} • ~${selectedPlace.walkMinutes || 1} min`
+                  }
+                ]
+              : filteredPlaces
+          }
           selectedId={selectedPlace ? selectedPlace.id : null}
           remainingCoords={liveNav ? liveNav.remainingCoords : activeRoute ? activeRoute.coords : []}
           walkedCoords={liveNav ? liveNav.walkedCoords : []}
@@ -1059,129 +1071,44 @@ export default function App() {
         </View>
       )}
 
-      {/* Top Navigation HUD (Visible ONLY when a destination is selected) */}
-      {selectedPlace && liveNav && (
-        <View style={styles.navHud}>
-          <View style={styles.turnBanner}>
-            <View style={styles.turnIconBox}>
-              <Text style={styles.turnIconText}>
-                {liveNav.currentStep ? liveNav.currentStep.icon : '⬆️'}
-              </Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.turnInstruction} numberOfLines={2}>
-                {liveNav.currentStep ? liveNav.currentStep.instruction : `Head to ${selectedPlace.name}`}
-              </Text>
-              <Text style={styles.turnSub} numberOfLines={1}>
-                {selectedPlace.emoji} {selectedPlace.name} •{' '}
-                {travelMode === 'driving'
-                  ? `🛵 ~₱${estimateTranspoFare(liveNav.remainingMeters, 'driving')} fare`
-                  : `🔥 ~${estimateWalkCalories(liveNav.remainingMeters)} kcal`}
-              </Text>
-            </View>
+      {/* Pure Full-Screen Focus Mode Top Controls (Back/X + Fit Route + Quick Spend) */}
+      {selectedPlace && (
+        <View style={styles.focusOnlyTopBar}>
+          <View style={styles.focusLeftRow}>
             <TouchableOpacity
-              style={styles.spendHudBtn}
-              onPress={() => openSpendForPlace(selectedPlace)}
-            >
-              <Text style={{ fontSize: 12, color: '#34d399', fontWeight: '800' }}>💸₱</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.shareHudBtn}
-              onPress={() => sharePlaceAndETA(selectedPlace)}
-            >
-              <Text style={{ fontSize: 15 }}>📤</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.closeHudBtn}
+              style={styles.focusBackBtn}
+              activeOpacity={0.85}
               onPress={stopNavigation}
             >
-              <Text style={{ color: '#fca5a5', fontSize: 14, fontWeight: '800' }}>✕</Text>
-            </TouchableOpacity>
-          </View>
-
-          {compassInfo && (
-            <View style={styles.compassBanner}>
-              <Text style={styles.compassArrow}>{compassInfo.arrow}</Text>
-              <Text style={styles.compassText}>
-                <Text style={{ color: '#fff', fontWeight: '800' }}>{compassInfo.label}</Text>{' '}
-                • {compassInfo.targetBearing}° (Facing {heading}°)
-              </Text>
-            </View>
-          )}
-
-          <View style={styles.statsGrid}>
-            <View style={styles.statCell}>
-              <Text style={styles.statVal}>{liveNav.remainingText}</Text>
-              <Text style={styles.statLbl}>DISTANCE</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statCell}>
-              <Text style={styles.statVal}>{liveNav.remainingMins} min</Text>
-              <Text style={styles.statLbl}>EST. TIME</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statCell}>
-              <Text style={[styles.statVal, { color: '#34d399' }]}>{liveNav.progressPercent}%</Text>
-              <Text style={styles.statLbl}>PROGRESS</Text>
-            </View>
-          </View>
-
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${liveNav.progressPercent}%` }]} />
-          </View>
-
-          <View style={styles.navControlsRow}>
-            <TouchableOpacity
-              style={[styles.navBtn, isSimulating && styles.navBtnActive]}
-              onPress={toggleWalkSimulator}
-            >
-              <Text style={styles.navBtnText}>
-                {isSimulating ? '⏸️ Pause' : '🚶 Sim Walk'}
-              </Text>
+              <Text style={styles.focusBackArrow}>←</Text>
+              <Text style={styles.focusBackText}>Back</Text>
+              <View style={styles.focusBackCloseCircle}>
+                <Text style={styles.focusBackCloseX}>✕</Text>
+              </View>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.navBtn, showStepsList && styles.navBtnActive]}
-              onPress={() => setShowStepsList(!showStepsList)}
+              style={styles.focusFitBtn}
+              activeOpacity={0.85}
+              onPress={() => mapRef.current?.focusPair(selectedPlace.lat, selectedPlace.lng)}
             >
-              <Text style={styles.navBtnText}>📋 Steps</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.navBtn, voiceEnabled && styles.navBtnActive]}
-              onPress={() => setVoiceEnabled(!voiceEnabled)}
-            >
-              <Text style={styles.navBtnText}>{voiceEnabled ? '🔊 Voice' : '🔇 Mute'}</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.navBtn}
-              onPress={() => openSpendForPlace(selectedPlace)}
-            >
-              <Text style={[styles.navBtnText, { color: '#34d399' }]}>💳 Spend</Text>
+              <Text style={styles.focusFitBtnText}>🎯 Fit Route</Text>
             </TouchableOpacity>
           </View>
 
-          {showStepsList && (
-            <View style={styles.stepsDrawer}>
-              {(liveNav.steps || []).slice(0, 5).map((s, i) => (
-                <View
-                  key={i}
-                  style={[styles.stepRow, i === liveNav.activeStepIdx && styles.stepRowActive]}
-                >
-                  <Text style={styles.stepText} numberOfLines={1}>
-                    {s.icon} {s.instruction}
-                  </Text>
-                  <Text style={styles.stepDist}>{s.distanceText}</Text>
-                </View>
-              ))}
-            </View>
-          )}
+          <TouchableOpacity
+            style={styles.focusSpendBtn}
+            activeOpacity={0.85}
+            onPress={() => openSpendForPlace(selectedPlace)}
+          >
+            <Text style={styles.focusSpendBtnText}>💸 Spend</Text>
+          </TouchableOpacity>
         </View>
       )}
 
-      {/* Clean Modern Bottom Sheet */}
-      <View style={[styles.bottomSheet, sheetMinimized && styles.bottomSheetMinimized]}>
+      {/* Clean Modern Bottom Sheet (Hidden completely when focused on a destination!) */}
+      {!selectedPlace && (
+        <View style={[styles.bottomSheet, sheetMinimized && styles.bottomSheetMinimized]}>
         <TouchableOpacity
           style={styles.sheetHandleWrap}
           onPress={() => setSheetMinimized(!sheetMinimized)}
@@ -1358,6 +1285,21 @@ export default function App() {
                   const diaryEntry = diary[item.id];
                   const estFare = estimateTranspoFare(item.distanceMeters, 'driving');
                   const estKcal = estimateWalkCalories(item.distanceMeters);
+                  const typicalSpotCost =
+                    item.category === 'hotel'
+                      ? 1200
+                      : item.category === 'cafe' || item.category === 'fast_food'
+                      ? 160
+                      : 250;
+                  const estTripTotal = typicalSpotCost + estFare;
+                  const budgetFit =
+                    walletBalance <= 0
+                      ? { dot: '💳', text: `Est. ~₱${estTripTotal} trip`, color: '#94a3b8' }
+                      : walletBalance >= estTripTotal
+                      ? { dot: '🟢', text: `Fits Budget (~₱${estTripTotal})`, color: '#34d399' }
+                      : walletBalance > estFare
+                      ? { dot: '🟡', text: `Tight Budget (₱${walletBalance.toLocaleString()} left)`, color: '#fbbf24' }
+                      : { dot: '🔴', text: `Low Balance (₱${walletBalance.toLocaleString()} left)`, color: '#f87171' };
                   const etaText =
                     item.distanceMeters > 3500 || travelMode === 'driving'
                       ? `🛵 ${Math.max(1, Math.round(item.distanceMeters / 450))}m • ~₱${estFare}`
@@ -1385,7 +1327,10 @@ export default function App() {
                             {item.name}
                           </Text>
                           <Text style={styles.placeMeta} numberOfLines={1}>
-                            {item.typeLabel} • {crowdBadge.dot} {crowdBadge.label}
+                            {item.typeLabel} • {crowdBadge.dot} {crowdBadge.label} •{' '}
+                            <Text style={{ color: budgetFit.color, fontWeight: '700' }}>
+                              {budgetFit.dot} {budgetFit.text}
+                            </Text>
                           </Text>
                           {diaryEntry ? (
                             <Text style={styles.diaryBadge} numberOfLines={1}>
@@ -1452,7 +1397,8 @@ export default function App() {
             )}
           </>
         )}
-      </View>
+        </View>
+      )}
 
       {/* ===================================================================== */}
       {/* CENTRALIZED BUDGETING SYSTEM (WEALTHSYNC) CONNECTED TO MAP TRACKER    */}
@@ -2720,5 +2666,100 @@ const styles = StyleSheet.create({
     marginBottom: 7,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.06)'
+  },
+  focusOnlyTopBar: {
+    position: 'absolute',
+    top: Platform.OS === 'android' ? (RNStatusBar.currentHeight || 28) + 12 : 52,
+    left: 14,
+    right: 14,
+    zIndex: 50,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+  focusLeftRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  focusBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(11, 15, 25, 0.92)',
+    paddingVertical: 9,
+    paddingLeft: 14,
+    paddingRight: 10,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    elevation: 8,
+    gap: 8
+  },
+  focusFitBtn: {
+    backgroundColor: 'rgba(11, 15, 25, 0.92)',
+    paddingVertical: 9,
+    paddingHorizontal: 13,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: 'rgba(56, 189, 248, 0.4)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 7
+  },
+  focusFitBtnText: {
+    color: '#38bdf8',
+    fontSize: 12.5,
+    fontWeight: '800'
+  },
+  focusSpendBtn: {
+    backgroundColor: 'rgba(6, 78, 59, 0.94)',
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: '#10b981',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 7
+  },
+  focusSpendBtnText: {
+    color: '#34d399',
+    fontSize: 12.5,
+    fontWeight: '800'
+  },
+  focusBackArrow: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '900'
+  },
+  focusBackText: {
+    color: '#ffffff',
+    fontSize: 13.5,
+    fontWeight: '800',
+    letterSpacing: 0.3
+  },
+  focusBackCloseCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(239, 68, 68, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(248, 113, 113, 0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 2
+  },
+  focusBackCloseX: {
+    color: '#fca5a5',
+    fontSize: 11,
+    fontWeight: '900'
   }
 });

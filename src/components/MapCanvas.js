@@ -431,7 +431,12 @@ const SELF_CONTAINED_MAP_HTML = `
         markersHtml += '<div class="' + cls + '" style="left:' + rx + 'px;top:' + ry + 'px;" onclick="selectPlace(\\'' + p.id + '\\')"><span>' + (p.emoji || '🍴') + '</span></div>';
         if (isSel && p.name) {
           const safeName = String(p.name).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          markersHtml += '<div class="pin-label" style="left:' + rx + 'px;top:' + ry + 'px;">' + (p.emoji || '📍') + ' ' + safeName + '</div>';
+          const distExtra = p.livePinSub
+            ? ' • ' + p.livePinSub
+            : p.distanceText
+            ? ' • ' + p.distanceText
+            : '';
+          markersHtml += '<div class="pin-label" style="left:' + rx + 'px;top:' + ry + 'px;">' + (p.emoji || '📍') + ' ' + safeName + distExtra + '</div>';
         }
       }
       markerContainer.innerHTML = markersHtml;
@@ -521,23 +526,25 @@ const SELF_CONTAINED_MAP_HTML = `
       }
     });
 
-    vp.addEventListener('touchend', (e) => {
+    vp.addEventListener('touchend', () => {
       initialPinchDist = null;
-      if (isDragging && !didMove && e.changedTouches && e.changedTouches.length === 1) {
-        const target = e.target;
-        if (!target.closest || (!target.closest('.poi-pin') && !target.closest('.zoom-btn'))) {
-          const tx = e.changedTouches[0].clientX;
-          const ty = e.changedTouches[0].clientY;
-          const coords = screenToLatLng(tx, ty);
-          if (window.ReactNativeWebView) {
-            window.ReactNativeWebView.postMessage(
-              JSON.stringify({ type: 'MAP_TAP', lat: coords.lat, lng: coords.lng })
-            );
-          }
-        }
-      }
       isDragging = false;
     });
+
+    function fitMapBounds(minLat, maxLat, minLng, maxLng) {
+      followUser = false;
+      centerLat = (minLat + maxLat) / 2;
+      centerLng = (minLng + maxLng) / 2;
+
+      const w = Math.max(260, window.innerWidth - 110);
+      const h = Math.max(280, window.innerHeight - 180);
+      const dx0 = Math.max(0.0000015, Math.abs(lng2tileX(maxLng, 0) - lng2tileX(minLng, 0)));
+      const dy0 = Math.max(0.0000015, Math.abs(lat2tileY(minLat, 0) - lat2tileY(maxLat, 0)));
+      const zoomX = Math.log2(w / (256 * dx0));
+      const zoomY = Math.log2(h / (256 * dy0));
+      const bestZoom = Math.floor(Math.min(zoomX, zoomY));
+      zoom = Math.max(12, Math.min(18, bestZoom));
+    }
 
     window.handleCommand = function(msg) {
       if (!msg || !msg.type) return;
@@ -586,11 +593,22 @@ const SELF_CONTAINED_MAP_HTML = `
         tileStyle = (tileStyle + 1) % 3;
         render();
       }
+      if (msg.type === 'FOCUS_PAIR') {
+        const dLat = msg.destLat;
+        const dLng = msg.destLng;
+        if (typeof dLat === 'number' && typeof dLng === 'number') {
+          const minLat = Math.min(userLat, dLat);
+          const maxLat = Math.max(userLat, dLat);
+          const minLng = Math.min(userLng, dLng);
+          const maxLng = Math.max(userLng, dLng);
+          fitMapBounds(minLat, maxLat, minLng, maxLng);
+          render();
+        }
+      }
       if (msg.type === 'DRAW_ROUTE') {
         remainingRoute = msg.coords || [];
         walkedRoute = [];
         if (remainingRoute.length > 0) {
-          followUser = false;
           let minLat = userLat, maxLat = userLat, minLng = userLng, maxLng = userLng;
           remainingRoute.forEach((pt) => {
             if (pt[0] < minLat) minLat = pt[0];
@@ -598,15 +616,7 @@ const SELF_CONTAINED_MAP_HTML = `
             if (pt[1] < minLng) minLng = pt[1];
             if (pt[1] > maxLng) maxLng = pt[1];
           });
-          centerLat = (minLat + maxLat) / 2;
-          centerLng = (minLng + maxLng) / 2;
-
-          // Calculate best zoom so both User and Selected Place fit cleanly in view
-          const latDiff = Math.max(0.0015, (maxLat - minLat) * 1.65);
-          const lngDiff = Math.max(0.0015, (maxLng - minLng) * 1.65);
-          const maxSpan = Math.max(latDiff, lngDiff);
-          let bestZoom = Math.floor(Math.log2(360 / maxSpan));
-          zoom = Math.max(11, Math.min(17, bestZoom));
+          fitMapBounds(minLat, maxLat, minLng, maxLng);
         }
         render();
       }
@@ -665,7 +675,9 @@ const MapCanvas = forwardRef(
         lat: p.lat,
         lng: p.lng,
         category: p.category,
-        emoji: p.emoji
+        emoji: p.emoji,
+        distanceText: p.distanceText,
+        livePinSub: p.livePinSub
       }));
       sendCommand({
         type: 'SYNC_STATE',
@@ -692,6 +704,8 @@ const MapCanvas = forwardRef(
       renderPOIs: (list, selId) =>
         sendCommand({ type: 'SYNC_STATE', places: list, selectedId: selId }),
       drawRoute: (coords) => sendCommand({ type: 'DRAW_ROUTE', coords }),
+      focusPair: (destLat, destLng) =>
+        sendCommand({ type: 'FOCUS_PAIR', destLat, destLng }),
       updateWalkPath: (remaining, walked) =>
         sendCommand({
           type: 'SYNC_STATE',
